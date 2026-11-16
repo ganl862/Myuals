@@ -1,9 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Download, Film, Sliders, Type } from 'lucide-react';
-import { MediaPanel } from './components/MediaPanel';
-import { MotionExportPanel } from './components/MotionExportPanel';
-import { TransitionViewport } from './components/TransitionViewport';
-import { TypographyPanel } from './components/TypographyPanel';
+import { CleanInspector, InspectorTab } from './components/CleanInspector';
+import { ActiveContextKey, ContextSwitcher } from './components/ContextSwitcher';
+import { ExportModal } from './components/ExportModal';
+import { StudioMonitor } from './components/StudioMonitor';
+import { TopBar } from './components/TopBar';
+import {
+  ComposableCanvasRenderer,
+  isCosmicSlideActive,
+  LoadedMediaSource,
+  resolveActiveDurationMs,
+} from './engine/composableRenderer';
 import {
   exportTransitionVideo,
   ExportFormat,
@@ -21,28 +27,54 @@ import {
   updateClipTrim,
   updateImageClipDuration,
 } from './engine/mediaTimeline';
+import { computeTimelineState } from './engine/motionMath';
 import {
-  computeTimelineState,
-  DEFAULT_MOTION_PARAMS,
-  FPS,
-  MotionParams,
-  TOTAL_DURATION_MS,
-  TOTAL_FRAMES,
-} from './engine/motionMath';
-import { LoadedMediaSource, TransitionCanvasRenderer } from './engine/renderer';
+  AttachedEffectInstance,
+  ClipTransitionAssignment,
+  createClipAssignment,
+  createDefaultSelects,
+  createDefaultTextEffects,
+  createDefaultToggles,
+  createDefaultValues,
+  createEffectInstance,
+  EffectModifierId,
+  getTransitionDef,
+  TextTargetSlot,
+  TransitionModuleId,
+} from './engine/registry';
 import { DEFAULT_TEXT_CONFIG, TextLayerConfig } from './engine/typography';
 
-type ControlTab = 'media' | 'typography' | 'motion';
+function buildInitialAssignments(clips: MediaClipItem[]): Record<string, ClipTransitionAssignment> {
+  const out: Record<string, ClipTransitionAssignment> = {};
+  clips.forEach((clip, idx) => {
+    const defId: TransitionModuleId =
+      idx === 0
+        ? 'master-3d-neon-whip'
+        : idx === 1
+          ? 'smooth-zoom-out-tilt'
+          : 'fake-zoom-geo-slide';
+    out[clip.id] = createClipAssignment(defId);
+  });
+  return out;
+}
 
 export default function App() {
   const [clips, setClips] = useState<MediaClipItem[]>(() => createDefaultDemoClips());
+  const [clipAssignments, setClipAssignments] = useState<
+    Record<string, ClipTransitionAssignment>
+  >(() => buildInitialAssignments(createDefaultDemoClips()));
+  const [textEffects, setTextEffects] = useState<AttachedEffectInstance[]>(() =>
+    createDefaultTextEffects()
+  );
+
   const [aspectRatio, setAspectRatio] = useState<AspectRatioOption>('auto');
   const [textConfig, setTextConfig] = useState<TextLayerConfig>(DEFAULT_TEXT_CONFIG);
-  const [motionParams, setMotionParams] = useState<MotionParams>(DEFAULT_MOTION_PARAMS);
   const [useWebGL, setUseWebGL] = useState<boolean>(true);
   const [webglSupported, setWebglSupported] = useState<boolean>(true);
 
-  const [activeTab, setActiveTab] = useState<ControlTab>('media');
+  const [activeContext, setActiveContext] = useState<ActiveContextKey>('clip-0');
+  const [inspectorTab, setInspectorTab] = useState<InspectorTab>('transition');
+
   const [timeMs, setTimeMs] = useState<number>(0);
   const [isPlaying, setIsPlaying] = useState<boolean>(() => {
     if (typeof window !== 'undefined') {
@@ -50,9 +82,9 @@ export default function App() {
     }
     return false;
   });
-  const [isLooping, setIsLooping] = useState<boolean>(true);
 
-  // Export state
+  // Export Modal State
+  const [exportModalOpen, setExportModalOpen] = useState<boolean>(false);
   const [exportFormat, setExportFormat] = useState<ExportFormat>('mp4');
   const [isExporting, setIsExporting] = useState<boolean>(false);
   const [exportProgress, setExportProgress] = useState<ExportProgress | null>(null);
@@ -61,7 +93,7 @@ export default function App() {
   const exportAbortRef = useRef<AbortController | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const rendererRef = useRef<TransitionCanvasRenderer | null>(null);
+  const rendererRef = useRef<ComposableCanvasRenderer | null>(null);
   const mediaSourcesRef = useRef<Map<string, LoadedMediaSource>>(new Map());
 
   // Initialize procedural demo sources in ref
@@ -77,37 +109,102 @@ export default function App() {
     }
   }, [clips]);
 
-  const dimensions = useMemo(
-    () => resolveCanvasDimensions(aspectRatio, clips[0]),
-    [aspectRatio, clips]
+  // Ensure every clip always has an assignment entry
+  useEffect(() => {
+    setClipAssignments((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      clips.forEach((c, idx) => {
+        if (!next[c.id]) {
+          changed = true;
+          next[c.id] = createClipAssignment(
+            idx === 0
+              ? 'master-3d-neon-whip'
+              : idx === 1
+                ? 'smooth-zoom-out-tilt'
+                : 'fake-zoom-geo-slide'
+          );
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [clips]);
+
+  const isCosmicActive = useMemo(
+    () => isCosmicSlideActive(clips, clipAssignments),
+    [clips, clipAssignments]
   );
 
-  const timelineState = useMemo(
-    () => computeTimelineState(timeMs, motionParams),
-    [timeMs, motionParams]
+  const hasClassicTextActive = useMemo(() => {
+    return clips.some((clip) => {
+      const id = clipAssignments[clip.id]?.transitionId ?? 'master-3d-neon-whip';
+      return id !== 'cosmic_slide_3d' && getTransitionDef(id).hasTextLayer;
+    });
+  }, [clips, clipAssignments]);
+
+  const hasTextLayer = useMemo(() => {
+    return clips.some((clip) => {
+      const assign = clipAssignments[clip.id];
+      if (!assign) return true;
+      return getTransitionDef(assign.transitionId).hasTextLayer;
+    });
+  }, [clips, clipAssignments]);
+
+  const totalDurationMs = useMemo(
+    () => resolveActiveDurationMs(clips, clipAssignments),
+    [clips, clipAssignments]
   );
 
-  // Latest state refs so rAF loop & mount-once renderer never tear down
+  // Clamp timeMs when user shortens total duration
+  useEffect(() => {
+    setTimeMs((prev) => (prev > totalDurationMs ? totalDurationMs : prev));
+  }, [totalDurationMs]);
+
+  // Keep activeContext and inspectorTab consistent when text layer disappears or clips shrink
+  useEffect(() => {
+    if (!hasTextLayer && activeContext === 'text') {
+      setActiveContext('clip-0');
+      setInspectorTab('transition');
+    } else if (activeContext === 'clip-1' && clips.length < 2) {
+      setActiveContext('clip-0');
+    } else if (activeContext === 'clip-2' && clips.length < 3) {
+      setActiveContext(clips.length >= 2 ? 'clip-1' : 'clip-0');
+    }
+  }, [hasTextLayer, activeContext, clips.length]);
+
+  const dimensions = useMemo(() => {
+    if (
+      aspectRatio === 'auto' &&
+      isCosmicActive &&
+      clips.every((c) => c.kind === 'procedural')
+    ) {
+      return { width: 1280, height: 720, aspectRatio: 16 / 9 };
+    }
+    return resolveCanvasDimensions(aspectRatio, clips[0]);
+  }, [aspectRatio, clips, isCosmicActive]);
+
   const renderInputsRef = useRef({
     timeMs,
+    totalDurationMs,
+    isCosmicActive,
     dimensions,
     clips,
+    clipAssignments,
+    textEffects,
     textConfig,
-    motionParams,
     useWebGL,
-    isPlaying,
-    isLooping,
   });
 
   renderInputsRef.current = {
     timeMs,
+    totalDurationMs,
+    isCosmicActive,
     dimensions,
     clips,
+    clipAssignments,
+    textEffects,
     textConfig,
-    motionParams,
     useWebGL,
-    isPlaying,
-    isLooping,
   };
 
   const drawNow = useCallback((targetMs: number) => {
@@ -115,23 +212,32 @@ export default function App() {
     const renderer = rendererRef.current;
     if (!canvas || !renderer) return;
     const inputs = renderInputsRef.current;
-    const st = computeTimelineState(targetMs, inputs.motionParams);
-    renderer.syncVideoTimes(inputs.clips, mediaSourcesRef.current, st);
+    const st = computeTimelineState(targetMs);
+    renderer.syncVideoTimes(
+      inputs.clips,
+      mediaSourcesRef.current,
+      st,
+      targetMs,
+      inputs.totalDurationMs,
+      inputs.isCosmicActive
+    );
     renderer.renderFrame(canvas, {
       timeMs: targetMs,
+      totalDurationMs: inputs.totalDurationMs,
       dimensions: inputs.dimensions,
       clips: inputs.clips,
+      clipAssignments: inputs.clipAssignments,
+      textEffects: inputs.textEffects,
       mediaSources: mediaSourcesRef.current,
       textConfig: inputs.textConfig,
-      motionParams: inputs.motionParams,
       useWebGL: inputs.useWebGL,
     });
   }, []);
 
-  // Mount WebGL + Canvas2D renderer once
+  // Mount GPU/Canvas2D renderer once
   useEffect(() => {
     const dims = renderInputsRef.current.dimensions;
-    const renderer = new TransitionCanvasRenderer(dims.width, dims.height);
+    const renderer = new ComposableCanvasRenderer(dims.width, dims.height);
     rendererRef.current = renderer;
     setWebglSupported(renderer.isWebGLAvailable());
     drawNow(renderInputsRef.current.timeMs);
@@ -142,21 +248,33 @@ export default function App() {
     };
   }, [drawNow]);
 
-  // Re-render whenever non-playback inputs change while paused
+  // Re-render whenever inputs change while paused
   useEffect(() => {
     if (!isPlaying) {
       drawNow(timeMs);
     }
-  }, [isPlaying, timeMs, dimensions, clips, textConfig, motionParams, useWebGL, drawNow]);
+  }, [
+    isPlaying,
+    timeMs,
+    totalDurationMs,
+    dimensions,
+    clips,
+    clipAssignments,
+    textEffects,
+    textConfig,
+    useWebGL,
+    drawNow,
+  ]);
 
-  // Smooth 60fps playback loop
+  // 60fps real-time playback loop
   useEffect(() => {
     if (!isPlaying) return;
 
     let rafId = 0;
     let lastStamp = performance.now();
+    const startDur = Math.max(1000, renderInputsRef.current.totalDurationMs);
     let currentMs = renderInputsRef.current.timeMs;
-    if (currentMs >= TOTAL_DURATION_MS) {
+    if (currentMs >= startDur) {
       currentMs = 0;
       setTimeMs(0);
     }
@@ -166,19 +284,8 @@ export default function App() {
       const dt = Math.min(100, Math.max(0, now - lastStamp));
       lastStamp = now;
 
-      currentMs += dt;
-      if (currentMs >= TOTAL_DURATION_MS) {
-        if (renderInputsRef.current.isLooping) {
-          currentMs = currentMs % TOTAL_DURATION_MS;
-        } else {
-          currentMs = TOTAL_DURATION_MS;
-          drawNow(currentMs);
-          setTimeMs(currentMs);
-          setIsPlaying(false);
-          return;
-        }
-      }
-
+      const activeDur = Math.max(1000, renderInputsRef.current.totalDurationMs);
+      currentMs = (currentMs + dt) % activeDur;
       drawNow(currentMs);
 
       if (now - lastHudSync >= 33) {
@@ -195,23 +302,13 @@ export default function App() {
 
   const handleSeekMs = useCallback(
     (nextMs: number) => {
-      const clamped = Math.max(0, Math.min(TOTAL_DURATION_MS, nextMs));
+      const maxDur = Math.max(1000, renderInputsRef.current.totalDurationMs);
+      const clamped = Math.max(0, Math.min(maxDur, nextMs));
       setIsPlaying(false);
       setTimeMs(clamped);
       drawNow(clamped);
     },
     [drawNow]
-  );
-
-  const handleStepFrame = useCallback(
-    (delta: number) => {
-      setIsPlaying(false);
-      const stepMs = TOTAL_DURATION_MS / (TOTAL_FRAMES - 1);
-      const next = Math.max(0, Math.min(TOTAL_DURATION_MS, timeMs + delta * stepMs));
-      setTimeMs(next);
-      drawNow(next);
-    },
-    [timeMs, drawNow]
   );
 
   const loadSingleLocalFile = useCallback(
@@ -245,7 +342,7 @@ export default function App() {
       if (file.type.startsWith('video/')) {
         return new Promise((resolve) => {
           const video = document.createElement('video');
-          video.muted = true; // Zero audio processing pipeline
+          video.muted = true; // 100% zero audio pipeline
           video.playsInline = true;
           video.preload = 'auto';
           video.onloadedmetadata = () => {
@@ -290,26 +387,69 @@ export default function App() {
           if (old.srcUrl) URL.revokeObjectURL(old.srcUrl);
           mediaSourcesRef.current.delete(old.id);
           next[replaceIndex] = loaded[0];
+          setClipAssignments((aPrev) => {
+            const aNext = { ...aPrev };
+            const oldAssign = aNext[old.id];
+            delete aNext[old.id];
+            aNext[loaded[0].id] =
+              oldAssign ??
+              createClipAssignment(
+                replaceIndex === 0 ? 'master-3d-neon-whip' : 'smooth-zoom-out-tilt'
+              );
+            return aNext;
+          });
           return next;
         }
 
-        // Bulk upload: if user uploads 2 or 3 files, replace slots or append up to 3
+        // Bulk upload of 2 or 3 files replaces the sequence cleanly
         if (loaded.length >= 2) {
           for (const old of prev) {
             if (old.srcUrl) URL.revokeObjectURL(old.srcUrl);
             mediaSourcesRef.current.delete(old.id);
           }
-          return loaded.slice(0, 3);
+          const nextClips = loaded.slice(0, 3);
+          setClipAssignments(buildInitialAssignments(nextClips));
+          setActiveContext('clip-0');
+          return nextClips;
         }
 
-        // Single file added
-        if (prev.length < 3) {
-          return [...prev, loaded[0]];
+        // Single file upload: if currently on procedural demo clips, enter single-clip mode cleanly;
+        // otherwise append up to 3 clips or replace clip-0.
+        const onlyDemo = prev.every((c) => c.kind === 'procedural');
+        if (onlyDemo) {
+          for (const old of prev) {
+            mediaSourcesRef.current.delete(old.id);
+          }
+          const single = [loaded[0]];
+          setClipAssignments(buildInitialAssignments(single));
+          setActiveContext('clip-0');
+          return single;
         }
+
+        if (prev.length < 3) {
+          const appended = [...prev, loaded[0]];
+          setClipAssignments((aPrev) => ({
+            ...aPrev,
+            [loaded[0].id]: createClipAssignment(
+              appended.length === 2 ? 'smooth-zoom-out-tilt' : 'fake-zoom-geo-slide'
+            ),
+          }));
+          setActiveContext(appended.length === 2 ? 'clip-1' : 'clip-2');
+          return appended;
+        }
+
         const next = [...prev];
         if (next[0].srcUrl) URL.revokeObjectURL(next[0].srcUrl);
         mediaSourcesRef.current.delete(next[0].id);
+        const oldId = next[0].id;
         next[0] = loaded[0];
+        setClipAssignments((aPrev) => {
+          const aNext = { ...aPrev };
+          const preserved = aNext[oldId];
+          delete aNext[oldId];
+          aNext[loaded[0].id] = preserved ?? createClipAssignment('master-3d-neon-whip');
+          return aNext;
+        });
         return next;
       });
     },
@@ -348,9 +488,10 @@ export default function App() {
         format: exportFormat,
         dimensions,
         clips,
+        clipAssignments,
+        textEffects,
         mediaSources: mediaSourcesRef.current,
         textConfig,
-        motionParams,
         useWebGL,
         onProgress: (p) => setExportProgress(p),
         abortSignal: controller.signal,
@@ -359,204 +500,292 @@ export default function App() {
     } catch (err) {
       if ((err as Error)?.message !== 'Export cancelled') {
         setExportError(
-          err instanceof Error ? err.message : 'Local export failed on this browser.'
+          err instanceof Error ? err.message : 'تعذر التصدير المحلي على هذا المتصفح.'
         );
       }
     } finally {
       setIsExporting(false);
       exportAbortRef.current = null;
     }
-  }, [isExporting, exportFormat, dimensions, clips, textConfig, motionParams, useWebGL]);
+  }, [isExporting, exportFormat, dimensions, clips, clipAssignments, textEffects, textConfig, useWebGL]);
+
+  // Context Switcher derived targets
+  const activeClipIndex =
+    activeContext === 'clip-1' && clips.length >= 2
+      ? 1
+      : activeContext === 'clip-2' && clips.length >= 3
+        ? 2
+        : 0;
+  const activeClip = activeContext === 'text' ? null : (clips[activeClipIndex] ?? null);
+  const activeAssignment = activeClip ? (clipAssignments[activeClip.id] ?? null) : null;
+  const activeEffects =
+    activeContext === 'text' ? textEffects : (activeAssignment?.effects ?? []);
+
+  const handleSelectContext = useCallback(
+    (ctx: ActiveContextKey) => {
+      setActiveContext(ctx);
+      if (ctx === 'text') {
+        setInspectorTab((prev) => (prev === 'transition' ? 'text' : prev));
+      } else {
+        setInspectorTab((prev) => (prev === 'text' ? 'transition' : prev));
+      }
+    },
+    []
+  );
+
+  const handleSelectClipTransition = useCallback(
+    (clipId: string, transitionId: TransitionModuleId) => {
+      const def = getTransitionDef(transitionId);
+      setTimeMs(0);
+      setClipAssignments((prev) => {
+        const next: Record<string, ClipTransitionAssignment> = {
+          ...prev,
+          [clipId]: {
+            transitionId,
+            values: createDefaultValues(def.params),
+            toggles: createDefaultToggles(def.toggles),
+            selects: createDefaultSelects(def.selects),
+            effects: createClipAssignment(transitionId).effects,
+          },
+        };
+        if (transitionId === 'cosmic_slide_3d' && clips[0]?.id === clipId && clips[1]) {
+          const c2Prev = prev[clips[1].id];
+          if (!c2Prev || c2Prev.transitionId === 'smooth-zoom-out-tilt') {
+            next[clips[1].id] = createClipAssignment('focus_pulse_shake');
+          }
+        }
+        return next;
+      });
+    },
+    [clips]
+  );
+
+  const handleUpdateClipTransitionParam = useCallback(
+    (clipId: string, key: string, value: number) => {
+      setClipAssignments((prev) => {
+        const existing = prev[clipId];
+        if (!existing) return prev;
+        return {
+          ...prev,
+          [clipId]: {
+            ...existing,
+            values: {
+              ...existing.values,
+              [key]: value,
+            },
+          },
+        };
+      });
+    },
+    []
+  );
+
+  const handleUpdateClipTransitionToggle = useCallback(
+    (clipId: string, key: string, value: boolean) => {
+      setClipAssignments((prev) => {
+        const existing = prev[clipId];
+        if (!existing) return prev;
+        return {
+          ...prev,
+          [clipId]: {
+            ...existing,
+            toggles: {
+              ...(existing.toggles ?? {}),
+              [key]: value,
+            },
+          },
+        };
+      });
+    },
+    []
+  );
+
+  const handleUpdateClipTransitionSelect = useCallback(
+    (clipId: string, key: string, value: string) => {
+      setClipAssignments((prev) => {
+        const existing = prev[clipId];
+        if (!existing) return prev;
+        return {
+          ...prev,
+          [clipId]: {
+            ...existing,
+            selects: {
+              ...(existing.selects ?? {}),
+              [key]: value,
+            },
+          },
+        };
+      });
+    },
+    []
+  );
+
+  const handleUpdateActiveEffects = useCallback(
+    (next: AttachedEffectInstance[]) => {
+      if (activeContext === 'text') {
+        setTextEffects(next);
+      } else if (activeClip) {
+        setClipAssignments((prev) => {
+          const existing = prev[activeClip.id];
+          if (!existing) return prev;
+          return {
+            ...prev,
+            [activeClip.id]: {
+              ...existing,
+              effects: next,
+            },
+          };
+        });
+      }
+    },
+    [activeContext, activeClip]
+  );
+
+  const handleAddEffect = useCallback(
+    (effectId: EffectModifierId, targetSlot?: TextTargetSlot) => {
+      const instance = createEffectInstance(
+        effectId,
+        activeContext === 'text' ? 'behind-text' : undefined,
+        activeContext === 'text' ? (targetSlot ?? 'all') : undefined
+      );
+      if (activeContext === 'text') {
+        setTextEffects((prev) => [...prev, instance]);
+      } else if (activeClip) {
+        setClipAssignments((prev) => {
+          const existing = prev[activeClip.id];
+          if (!existing) return prev;
+          return {
+            ...prev,
+            [activeClip.id]: {
+              ...existing,
+              effects: [...existing.effects, instance],
+            },
+          };
+        });
+      }
+    },
+    [activeContext, activeClip]
+  );
 
   return (
-    <div className="min-h-screen bg-[#0B0D12] text-[#F4F5F7] flex flex-col">
-      {/* Compact Sticky Top Bar (<= 56px, well under 15% mobile cap) */}
-      <header className="sticky top-0 z-30 h-14 px-4 sm:px-6 bg-[#0B0D12]/90 backdrop-blur-md border-b border-white/8 flex items-center justify-between gap-4">
-        <span className="text-base sm:text-lg font-bold tracking-tight text-white whitespace-nowrap shrink-0">
-          KinetiCard Studio
-        </span>
+    <div className="min-h-screen lg:h-screen bg-[#111317] text-[#F3F4F6] flex flex-col overflow-x-hidden">
+      {/* Zone 1: Fixed Top Bar (~8%, strictly 3 controls) */}
+      <TopBar
+        aspectRatio={aspectRatio}
+        onChangeAspectRatio={setAspectRatio}
+        onUploadFiles={(files) => handleUploadFiles(files)}
+        onOpenExport={() => setExportModalOpen(true)}
+      />
 
-        <button
-          type="button"
-          onClick={() => {
-            setActiveTab('motion');
-            if (!isExporting) {
-              void handleStartExport();
-            }
-          }}
-          className="min-h-[40px] px-4 py-1.5 rounded-xl bg-[#FF1493] hover:bg-[#E60E83] text-white text-xs sm:text-sm font-semibold flex items-center gap-2 whitespace-nowrap shrink-0 transition-colors focus-visible:outline-2 focus-visible:outline-white"
-        >
-          <Download className="w-4 h-4" />
-          <span>Export {FPS}fps</span>
-        </button>
-      </header>
+      {/* 4-Zone Architecture Workspace:
+          Mobile: Vertical stack (Monitor + Context + Inspector)
+          Desktop (lg): 2 Columns (Left 55% Studio Monitor, Right 45% Context Switcher + Inspector) */}
+      <main
+        dir="ltr"
+        className="flex-1 min-h-0 p-3 lg:p-4 flex flex-col lg:grid lg:grid-cols-[55fr_45fr] gap-3 lg:gap-4"
+      >
+        {/* Zone 2: Studio Monitor (Left 55% on desktop, generously sized on mobile for sharp clarity) */}
+        <div className="shrink-0 h-[43vh] min-h-[265px] max-h-[420px] lg:h-full lg:max-h-none lg:min-h-0">
+          <StudioMonitor
+            canvasRef={canvasRef}
+            dimensions={dimensions}
+            timeMs={timeMs}
+            totalDurationMs={totalDurationMs}
+            isPlaying={isPlaying}
+            onTogglePlay={() => setIsPlaying((p) => !p)}
+            onReset={() => handleSeekMs(0)}
+            onSeekMs={handleSeekMs}
+          />
+        </div>
 
-      <main className="flex-1 w-full max-w-7xl mx-auto px-4 sm:px-6 py-3 sm:py-4 flex flex-col gap-4">
-        {/* Distinct Modular Transition Preset Card */}
-        <article
-          aria-label="Transition Preset Overview"
-          className="rounded-2xl bg-[#13161F] border border-white/8 px-4 py-3 sm:px-5 sm:py-3.5 flex flex-col gap-1.5"
-        >
-          <div className="flex flex-wrap items-center gap-2 text-xs text-[#9CA3AF]">
-            <span className="text-[#FF7EC3] font-medium">Transition Preset Module</span>
-            <span aria-hidden="true">·</span>
-            <span className="font-mono tabular-nums">4,166ms</span>
-            <span aria-hidden="true">·</span>
-            <span className="font-mono tabular-nums">250 frames @ 60fps</span>
-            <span aria-hidden="true">·</span>
-            <span>Offline WebGL &amp; WebCodecs</span>
-          </div>
-          <h1 className="text-base sm:text-xl font-bold tracking-tight text-white text-balance">
-            Master 3D Floating Card &amp; Neon Whip Cinematic Transition Flow
-          </h1>
-          <p className="text-xs text-[#9CA3AF] leading-relaxed max-w-4xl">
-            One-shot modular preset combining an intro beat-flash, full-to-card 3D perspective
-            shrink with bloom blast, a lateral whip-pan dash with motion blur, and a settling card
-            with animated Arabic neon calligraphy.
-          </p>
-        </article>
+        {/* Right 45% Column (Desktop) / Bottom Column (Mobile): Zone 3 + Zone 4 */}
+        <div className="flex-1 min-h-0 flex flex-col gap-3">
+          {/* Zone 3: Context Switcher */}
+          <ContextSwitcher
+            clips={clips}
+            activeContext={activeContext}
+            hasTextLayer={hasTextLayer}
+            onSelectContext={handleSelectContext}
+            onSwapClips={() => setClips((prev) => reorderClips(prev, 0, 1))}
+          />
 
-        {/* Responsive Studio Grid: Vertical on Mobile, 2-Column on Desktop */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
-          {/* Preview & Scrubber */}
-          <div className="lg:col-span-6 w-full">
-            <TransitionViewport
-              canvasRef={canvasRef}
-              dimensions={dimensions}
-              timelineState={timelineState}
-              isPlaying={isPlaying}
-              isLooping={isLooping}
-              onTogglePlay={() => setIsPlaying((p) => !p)}
-              onToggleLoop={() => setIsLooping((l) => !l)}
-              onReset={() => handleSeekMs(0)}
-              onSeekMs={handleSeekMs}
-              onStepFrame={handleStepFrame}
+          {/* Zone 4: Clean Inspector */}
+          <div className="flex-1 min-h-[340px] lg:min-h-0 flex flex-col">
+            <CleanInspector
+              activeContext={activeContext}
+              activeTab={inspectorTab}
+              onChangeTab={setInspectorTab}
+              hasTextLayer={hasTextLayer}
+              isCosmicActive={isCosmicActive}
+              hasClassicTextActive={hasClassicTextActive}
+              clips={clips}
+              activeClip={activeClip}
+              activeClipIndex={activeClipIndex}
+              activeAssignment={activeAssignment}
+              activeEffects={activeEffects}
+              textConfig={textConfig}
+              onSelectClipTransition={handleSelectClipTransition}
+              onUpdateClipTransitionParam={handleUpdateClipTransitionParam}
+              onUpdateClipTransitionToggle={handleUpdateClipTransitionToggle}
+              onUpdateClipTransitionSelect={handleUpdateClipTransitionSelect}
+              onUpdateImageDuration={(id, dur) =>
+                setClips((prev) =>
+                  prev.map((c) => (c.id === id ? updateImageClipDuration(c, dur) : c))
+                )
+              }
+              onUpdateTrim={(id, s, e) =>
+                setClips((prev) =>
+                  prev.map((c) => (c.id === id ? updateClipTrim(c, s, e) : c))
+                )
+              }
+              onReplaceClipFile={(idx, files) => handleUploadFiles(files, idx)}
+              onRemoveClip={(id) =>
+                setClips((prev) => {
+                  if (prev.length <= 1) return prev;
+                  const target = prev.find((c) => c.id === id);
+                  if (target?.srcUrl) URL.revokeObjectURL(target.srcUrl);
+                  mediaSourcesRef.current.delete(id);
+                  setClipAssignments((aPrev) => {
+                    const aNext = { ...aPrev };
+                    delete aNext[id];
+                    return aNext;
+                  });
+                  setActiveContext('clip-0');
+                  return prev.filter((c) => c.id !== id);
+                })
+              }
+              onUpdateActiveEffects={handleUpdateActiveEffects}
+              onAddEffect={handleAddEffect}
+              onChangeTextConfig={setTextConfig}
+              onUploadFont={handleUploadFont}
+              onClearFont={() =>
+                setTextConfig((prev) => ({
+                  ...prev,
+                  customFontFamily: null,
+                  customFontName: null,
+                }))
+              }
             />
           </div>
-
-          {/* Alight-Motion-Style Single-Touch Control Deck */}
-          <section
-            aria-label="Transition Controls"
-            className="lg:col-span-6 w-full rounded-2xl bg-[#13161F] border border-white/8 p-4 sm:p-5 flex flex-col gap-5"
-          >
-            {/* Segmented Tab Bar */}
-            <div
-              role="tablist"
-              aria-label="Editor sections"
-              className="grid grid-cols-3 gap-1.5 p-1 rounded-xl bg-[#0B0D12] border border-white/8"
-            >
-              <button
-                type="button"
-                role="tab"
-                aria-selected={activeTab === 'media'}
-                onClick={() => setActiveTab('media')}
-                className={`min-h-[44px] px-3 py-2 rounded-lg text-xs sm:text-sm font-semibold flex items-center justify-center gap-2 whitespace-nowrap transition-colors focus-visible:outline-2 focus-visible:outline-[#FF1493] ${
-                  activeTab === 'media'
-                    ? 'bg-[#1C202C] text-white border border-white/12'
-                    : 'text-[#9CA3AF] hover:text-white'
-                }`}
-              >
-                <Film className="w-4 h-4 text-[#FF1493]" />
-                <span>Media</span>
-              </button>
-
-              <button
-                type="button"
-                role="tab"
-                aria-selected={activeTab === 'typography'}
-                onClick={() => setActiveTab('typography')}
-                className={`min-h-[44px] px-3 py-2 rounded-lg text-xs sm:text-sm font-semibold flex items-center justify-center gap-2 whitespace-nowrap transition-colors focus-visible:outline-2 focus-visible:outline-[#FF1493] ${
-                  activeTab === 'typography'
-                    ? 'bg-[#1C202C] text-white border border-white/12'
-                    : 'text-[#9CA3AF] hover:text-white'
-                }`}
-              >
-                <Type className="w-4 h-4 text-[#FF1493]" />
-                <span>Typography</span>
-              </button>
-
-              <button
-                type="button"
-                role="tab"
-                aria-selected={activeTab === 'motion'}
-                onClick={() => setActiveTab('motion')}
-                className={`min-h-[44px] px-3 py-2 rounded-lg text-xs sm:text-sm font-semibold flex items-center justify-center gap-2 whitespace-nowrap transition-colors focus-visible:outline-2 focus-visible:outline-[#FF1493] ${
-                  activeTab === 'motion'
-                    ? 'bg-[#1C202C] text-white border border-white/12'
-                    : 'text-[#9CA3AF] hover:text-white'
-                }`}
-              >
-                <Sliders className="w-4 h-4 text-[#FF1493]" />
-                <span>FX &amp; Export</span>
-              </button>
-            </div>
-
-            {activeTab === 'media' && (
-              <MediaPanel
-                clips={clips}
-                aspectRatio={aspectRatio}
-                onChangeAspectRatio={setAspectRatio}
-                onUploadFiles={handleUploadFiles}
-                onReorderClip={(from, to) =>
-                  setClips((prev) => reorderClips(prev, from, to))
-                }
-                onUpdateImageDuration={(id, dur) =>
-                  setClips((prev) =>
-                    prev.map((c) => (c.id === id ? updateImageClipDuration(c, dur) : c))
-                  )
-                }
-                onUpdateTrim={(id, s, e) =>
-                  setClips((prev) =>
-                    prev.map((c) => (c.id === id ? updateClipTrim(c, s, e) : c))
-                  )
-                }
-                onRemoveClip={(id) =>
-                  setClips((prev) => {
-                    if (prev.length <= 2) return prev;
-                    const target = prev.find((c) => c.id === id);
-                    if (target?.srcUrl) URL.revokeObjectURL(target.srcUrl);
-                    mediaSourcesRef.current.delete(id);
-                    return prev.filter((c) => c.id !== id);
-                  })
-                }
-              />
-            )}
-
-            {activeTab === 'typography' && (
-              <TypographyPanel
-                config={textConfig}
-                onChange={setTextConfig}
-                onUploadFont={handleUploadFont}
-                onClearFont={() =>
-                  setTextConfig((prev) => ({
-                    ...prev,
-                    customFontFamily: null,
-                    customFontName: null,
-                  }))
-                }
-              />
-            )}
-
-            {activeTab === 'motion' && (
-              <MotionExportPanel
-                motionParams={motionParams}
-                useWebGL={useWebGL}
-                webglSupported={webglSupported}
-                onChangeMotionParams={setMotionParams}
-                onToggleWebGL={setUseWebGL}
-                exportFormat={exportFormat}
-                onChangeExportFormat={setExportFormat}
-                isExporting={isExporting}
-                exportProgress={exportProgress}
-                exportResult={exportResult}
-                exportError={exportError}
-                onStartExport={handleStartExport}
-                onCancelExport={() => exportAbortRef.current?.abort()}
-              />
-            )}
-          </section>
         </div>
       </main>
+
+      {/* Export Dialog (100% offline WebCodecs MP4 / WebM) */}
+      <ExportModal
+        open={exportModalOpen}
+        exportFormat={exportFormat}
+        useWebGL={useWebGL}
+        webglSupported={webglSupported}
+        isExporting={isExporting}
+        exportProgress={exportProgress}
+        exportResult={exportResult}
+        exportError={exportError}
+        onChangeFormat={setExportFormat}
+        onToggleWebGL={setUseWebGL}
+        onStartExport={handleStartExport}
+        onCancelExport={() => exportAbortRef.current?.abort()}
+        onClose={() => setExportModalOpen(false)}
+      />
     </div>
   );
 }

@@ -1,0 +1,95 @@
+TASK: Add ONE new module to the EXISTING app: a TRANSITION named "Karbala Cosmic Slide" (id: cosmic_slide_3d).
+Do NOT delete, rename or refactor anything that exists (UI, other transitions, shakes, effects). Follow the app's existing module-registry pattern; if none exists, create a minimal additive registry without changing the UI layout.
+
+CLASSIFICATION (decided by the editor):
+- Main unit = TRANSITION (per-clip, scene-level package): intro on clip A -> slide A->B -> outro on clip B. It has its own settings, independent from any other clip's transition/shake.
+- Also register these as separate ATTACHABLE/REMOVABLE modifiers, reusable on other elements:
+  1) "Picture Glow-Shadow-Feather" (red glow + drop shadow + soft edge fade behind an image layer)
+  2) "Starfield + Lens Flare Backdrop"
+  3) "Focus-Pulse Shake" (per-clip Shake, used here on clip B only)
+  If nested modifiers are not supported by the current architecture, implement them as internal sub-modules with the same parameters.
+
+HARD CONSTRAINTS:
+- 100% offline: no network, no CDN, no external fonts/libs. Canvas2D or WebGL only.
+- Deterministic render(t): output is a pure function of time t (no Date.now, no unseeded Math.random). Use a seeded PRNG (mulberry32) for stars/letter scatter so preview and export are identical.
+- Arabic RTL: connected Arabic text must keep correct joining. Render with canvas direction='rtl'. User-uploaded fonts via FontFace API; fallback stack: "Noto Naskh Arabic","Cairo",Tahoma,sans-serif. English text also supported (LTR).
+- No audio. Target 60fps; on small phones auto-reduce quality (fewer stars, half-res blur buffers). Controls must be usable at 360px width.
+
+COORDINATES/TIME:
+- Reference canvas 1280x720 @60fps, T_ref = 7.467s. x,y are fractions of W,H. Pixel values scale by H/720.
+- All times are reference seconds. If the user changes total duration T, scale every time by T/7.467. Fade-in/fade-out durations are user-overridable.
+
+INPUT VARIABLES (user-editable; defaults):
+imageA, imageB (user-replaceable; fit inside the box, preserving aspect ratio); titleText="كربلاء"; line1Text="دار النوايب"; line2Text="والبلى"; creditText="الايدتور الحسيني كاسدو" (toggle); accent=#FF2D2D; line1Color=#FFFFFF.
+
+LAYER ORDER (back -> front):
+L0 background: radial gradient, center #2A0B10 -> edges #050308, plus corner vignette (45% black). Overall grade: crimson/blue-black, low-key.
+L1 starfield: 3 depth layers (far/mid/near), ~260/160/70 particles; small white-blue dots plus a few red (#FF3B3B) and blue (#3BA0FF) dots.
+L2 lens flare (blue-white core #BFE8FF, radius ~14px, soft halo, anamorphic streak).
+L3 picture shadow + glow.
+L4 ghost frames (clip B only).
+L5 picture (A or B).
+L6 text belonging to the picture (moves with its picture layer).
+L7 credit text (fixed to screen).
+L8 global multiplier: fade-in/out opacity.
+
+TIMELINE
+1) GLOBAL FADE-IN: opacity 0 until t=0.20; 0.20->1.20 rises to 1 (easeOutCubic).
+
+2) PICTURE A (intro):
+ - Visible from t=0.25 with Gaussian blur 14px -> 0 over 0.25->1.30 (easeOutCubic).
+ - Frame width as fraction of W: 0.46@0.30, 0.55@1.05, 0.66@1.50, 0.70@2.00 (smooth, easeOutCubic). Center (0.52W, 0.47H). Max height 0.72H.
+ - 3D: perspective 1100px; right edge closer to the camera (right edge ~6% taller than left at t=1.05, ~3% at t=2.0): rotateY about -9deg@0.3 -> -4deg@2.0; rotateZ -2.2deg -> -1deg; plus slow dolly scale 1.00 -> 1.03 until the exit starts.
+ - Picture has a thin dark border (≈6px) rendered as a frame.
+
+3) TITLE (on picture A): text accent color, bold, height ≈ 9% of H, centered at (0.53W, 0.62H), glow = 0 0 12px rgba(255,45,45,0.7).
+ - 0.80: letters appear as a blurred red cluster near the picture center (scale 0.3, blur 10px, opacity 0.5).
+ - 0.80->1.40: each letter flies to its final position from a random offset (±60px, rotation ±25deg), scale 0.3->1.04->1.0 (slight overshoot), blur 10px->0, stagger 60ms with non-sequential order (seeded). Final state at t=1.40: crisp, fully joined.
+ - IMPORTANT Arabic: animate per-letter while preserving joining forms (split by grapheme and insert U+200D ZWJ contextually, or draw prefix-measured glyph slices of the already-shaped word). When assembled it must look identical to normally shaped text.
+ - After 2.0 the title travels with picture A (same transform).
+
+4) CREDIT TEXT (fixed screen-space layer): bottom-left (x 0.05-0.45, y 0.90), height ≈ 3% of H, color rgba(176,96,60,0.30) (use mix-blend-mode "screen"/"overlay" so it shifts hue over dark vs bright areas). Appears at 0.70 with glitchy partial letters (flicker, 4-5 on/off steps), stable by 2.4, then stays until the global fade-out. It does NOT move during the slide.
+
+5) STARFIELD during intro (0.40->2.0): stars move radially outward toward the camera (forward-fly), near layer fastest (up to 0.25W/s), far layer slowest. Lens flare fixed at (0.00W, 0.20H), streak pointing down-right at ~28deg below horizontal.
+
+6) SLIDE A->B (2.0 -> ~4.8) — camera pans left, so content moves RIGHT:
+ a) Picture A exits right: translateX 0 -> +1.1W over 2.00->3.00, easeInCubic (accelerating), peak speed ≈2.4-2.6s. It carries title with it.
+ b) Directional horizontal motion blur on picture A + title: 0 -> 60px (peak at ≈2.55) -> 0 at 3.0. Add subtle horizontal stretch of the text (scaleX up to 1.08) at the peak.
+ c) Starfield: from 2.2 to 4.2 stars become horizontal streaks (stretch x6->x10 at peak ≈2.8, relaxing to x1 by 4.4). Red and blue dots are separated horizontally (RGB split ±6px) while streaking. Add faint vertical 1px light streaks (alpha 0.12) between 3.7 and 4.6.
+ d) Lens flare travels left->right across the frame: x = 0.03@2.5, 0.38@2.9, 0.60@3.2, 0.74@3.4, 0.84@3.6, 0.92@3.8, 0.99@4.0, then exits (parallax: slower than the picture). Its streak angle rotates from 28deg to ~88deg (vertical) as x goes 0 -> 0.74.
+ e) Picture B enters from the LEFT: its left edge appears at x=0 at t≈3.30. Center x = -0.20W@3.30, 0.35W@4.50, 0.50W@6.20, easeOutExpo-like (cubic-bezier(0.16,1,0.3,1)), long deceleration. Horizontal blur 40px at 3.35 -> 0 at 4.2 (sharp by 4.2). Frame width (fraction of W): 0.55@3.6, 0.60@4.5, 0.58@5.0.
+ f) Picture B: perspective 1100px, same tilt logic as A (right edge slightly closer), center y ≈ 0.50H.
+
+7) PICTURE B DECORATION (L3/L4):
+ - 2 ghost frames behind B: offsets (-3%W,-1.5%H) and (-6%W,-3%H), scale 1.00 and 0.97, opacity 0.5 and 0.3; they lag behind B's motion by ~80ms and ~160ms (echo trail) and persist until the fade-out.
+ - Red neon outline (#FF2D2D, 3px + glow 18px, opacity 0 -> 0.8) fades in 4.9 -> 5.3.
+ - Both pictures (A and B) always have: drop shadow (0 18px 40px rgba(0,0,0,0.65)), red-tinted outer glow (accent, blur 30px, alpha 0.25), and a 6% soft feather/fade on the picture edges into the background.
+
+8) TEXTS ON PICTURE B (move/scale with picture B):
+ - line1 "دار النوايب": white, bold, height ≈ 7% of H, upper-right area of the picture, glow 0 0 8px rgba(255,255,255,0.5). Fade-in 3.35->3.75 (opacity 0->1, blur 6px->0, easeOutCubic).
+ - line2 "والبلى": accent red, same size, directly below line1 (line gap 1.5x), left edges of both lines aligned (user control: left/center/right), glow 0 0 14px rgba(255,45,45,0.8). Fade-in 4.40->5.00 (opacity 0->1, glow ramps 0 -> full).
+
+9) SHARP ZOOM + FOCUS PULSE + SHAKE (clip B, as Per-Clip Shake "Focus-Pulse Shake"; Active 5.00->5.80):
+ - Zoom punch: scale 1.00 -> 1.28 over 5.00->5.35 (easeOutExpo), then slow creep 1.28 -> 1.55 until 6.20 (easeOutCubic). Applies to picture B, its texts, ghost frames and neon outline together (zoom is about the picture center).
+ - Focus pulse: Gaussian blur 0 -> 8px at 5.40 (peak window 5.35-5.50) -> 0 at 5.80 (sine in-out). During 5.10-5.80 stars become bokeh discs (radius 6-14px, alpha 0.35, soft edge).
+ - Light shake: position jitter ±8px and rotation ±0.6deg, ~7Hz, exponential decay from t=5.05 to 5.60 (seeded noise).
+
+10) GLOBAL FADE-OUT: opacity 1 -> 0 over 6.00 -> 7.30 (linear with a slight ease-in-out), with extra scale 1.00 -> 1.06. Hold pure black 7.30 -> 7.467.
+
+OPTIONAL TOGGLE (default OFF): fine horizontal scanline slice-glitch on picture A during 0.9-1.3 (1-2px slices, ±3px offset, alpha 0.15).
+
+DO NOT REPLICATE: the thin gray strip at the bottom edge / white line at the top that flickers in the source reference.
+
+USER CONTROLS (mobile-friendly; sliders/toggles; defaults = reference):
+- imageA, imageB pickers; titleText, line1Text, line2Text; creditText + toggle; accent color; line1 color.
+- Total duration 3-12s (everything scales).
+- Slide direction (right/left/up/down; default right-exit), Motion Blur strength 0-100%.
+- Star density and speed; Lens Flare toggle and color.
+- Letter scatter amount and assembly duration.
+- Shake strength + toggle; zoom punch amount; Focus-Pulse toggle.
+- Glow color/intensity; shadow; edge feather; ghost frames toggle.
+- Fade-in and fade-out durations.
+
+ACCEPTANCE CHECKS (render(t) must match):
+t=0.10 pure black | t=0.5 dark and blurry picture A | t=1.40 title crisp and joined | t=2.55 peak horizontal blur, stars as streaks | t=3.45 left edge of picture B visible, blurred | t=4.5 line1 visible, line2 fading in | t=5.40 blur peak + zoomed 1.28x | t=6.5 dim, text readable | t=7.30 pure black.
+All existing features must continue to work exactly as before.

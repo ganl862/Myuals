@@ -1,8 +1,13 @@
 import * as Mp4Muxer from 'mp4-muxer';
 import * as WebMMuxer from 'webm-muxer';
-import { FPS, MotionParams, TOTAL_DURATION_MS, TOTAL_FRAMES } from './motionMath';
+import { FPS } from './motionMath';
 import { CanvasDimensions, mapProgressToClipTimeSec, MediaClipItem } from './mediaTimeline';
-import { LoadedMediaSource, TransitionCanvasRenderer } from './renderer';
+import {
+  ComposableCanvasRenderer,
+  LoadedMediaSource,
+  resolveActiveDurationMs,
+} from './composableRenderer';
+import { AttachedEffectInstance, ClipTransitionAssignment } from './registry';
 import { TextLayerConfig } from './typography';
 
 export type ExportFormat = 'mp4' | 'webm';
@@ -44,23 +49,36 @@ async function seekVideoToTime(video: HTMLVideoElement, targetSec: number): Prom
 async function syncSourcesForExportFrame(
   clips: MediaClipItem[],
   mediaSources: Map<string, LoadedMediaSource>,
-  clip1Prog: number,
-  clip2Prog: number
+  timeMs: number,
+  totalDurationMs: number
 ): Promise<void> {
   const tasks: Promise<void>[] = [];
+  const isSingle = clips.length === 1;
   const clip1 = clips[0];
-  const clip2 = clips[1] ?? clips[0];
+  const clip2 = clips[1];
+  const clip3 = clips[2];
+
+  const cutPoint = totalDurationMs * 0.45;
+  const c1Prog = isSingle ? timeMs / totalDurationMs : Math.min(1, timeMs / cutPoint);
+  const c2Prog = Math.max(0, Math.min(1, (timeMs - cutPoint) / (totalDurationMs - cutPoint)));
+  const c3Prog = Math.max(0, Math.min(1, (timeMs - totalDurationMs * 0.86) / (totalDurationMs * 0.14)));
 
   if (clip1) {
     const src1 = mediaSources.get(clip1.id);
     if (src1?.kind === 'video') {
-      tasks.push(seekVideoToTime(src1.element, mapProgressToClipTimeSec(clip1, clip1Prog)));
+      tasks.push(seekVideoToTime(src1.element, mapProgressToClipTimeSec(clip1, c1Prog)));
     }
   }
-  if (clip2 && clip2.id !== clip1?.id) {
+  if (!isSingle && clip2 && clip2.id !== clip1?.id) {
     const src2 = mediaSources.get(clip2.id);
     if (src2?.kind === 'video') {
-      tasks.push(seekVideoToTime(src2.element, mapProgressToClipTimeSec(clip2, clip2Prog)));
+      tasks.push(seekVideoToTime(src2.element, mapProgressToClipTimeSec(clip2, c2Prog)));
+    }
+  }
+  if (clip3) {
+    const src3 = mediaSources.get(clip3.id);
+    if (src3?.kind === 'video') {
+      tasks.push(seekVideoToTime(src3.element, mapProgressToClipTimeSec(clip3, c3Prog)));
     }
   }
   if (tasks.length > 0) {
@@ -110,9 +128,10 @@ export async function exportTransitionVideo(params: {
   format: ExportFormat;
   dimensions: CanvasDimensions;
   clips: MediaClipItem[];
+  clipAssignments: Record<string, ClipTransitionAssignment>;
+  textEffects: AttachedEffectInstance[];
   mediaSources: Map<string, LoadedMediaSource>;
   textConfig: TextLayerConfig;
-  motionParams: MotionParams;
   useWebGL: boolean;
   onProgress: (p: ExportProgress) => void;
   abortSignal?: AbortSignal;
@@ -121,16 +140,18 @@ export async function exportTransitionVideo(params: {
     format,
     dimensions,
     clips,
+    clipAssignments,
+    textEffects,
     mediaSources,
     textConfig,
-    motionParams,
     useWebGL,
     onProgress,
     abortSignal,
   } = params;
 
   const startMs = performance.now();
-  // Ensure even dimensions for H.264 / VP9 encoders
+  const totalDurationMs = resolveActiveDurationMs(clips, clipAssignments);
+  const totalFrames = Math.max(2, Math.round((totalDurationMs / 1000) * FPS));
   const width = Math.max(2, Math.floor(dimensions.width / 2) * 2);
   const height = Math.max(2, Math.floor(dimensions.height / 2) * 2);
   const exportDims: CanvasDimensions = { width, height, aspectRatio: width / height };
@@ -139,11 +160,11 @@ export async function exportTransitionVideo(params: {
   exportCanvas.width = width;
   exportCanvas.height = height;
 
-  const renderer = new TransitionCanvasRenderer(width, height);
+  const renderer = new ComposableCanvasRenderer(width, height);
 
   onProgress({
     frame: 0,
-    totalFrames: TOTAL_FRAMES,
+    totalFrames,
     percent: 0,
     stage: 'preparing',
   });
@@ -152,7 +173,6 @@ export async function exportTransitionVideo(params: {
     let targetFormat = format;
     let codecPick = await pickSupportedVideoCodec(targetFormat, width, height);
 
-    // If MP4 H.264 is unsupported in open-source Linux Chromium builds, automatically try WebM VP9/VP8 via WebCodecs
     if (!codecPick && targetFormat === 'mp4') {
       targetFormat = 'webm';
       codecPick = await pickSupportedVideoCodec('webm', width, height);
@@ -162,11 +182,7 @@ export async function exportTransitionVideo(params: {
       if (targetFormat === 'mp4' && codecPick.muxerCodec === 'avc') {
         const muxer = new Mp4Muxer.Muxer({
           target: new Mp4Muxer.ArrayBufferTarget(),
-          video: {
-            codec: 'avc',
-            width,
-            height,
-          },
+          video: { codec: 'avc', width, height },
           fastStart: 'in-memory',
           firstTimestampBehavior: 'offset',
         });
@@ -189,25 +205,25 @@ export async function exportTransitionVideo(params: {
 
         const frameDurationUs = Math.round(1_000_000 / FPS);
 
-        for (let f = 0; f < TOTAL_FRAMES; f++) {
+        for (let f = 0; f < totalFrames; f++) {
           if (abortSignal?.aborted) {
             encoder.close();
             throw new Error('Export cancelled');
           }
           if (encoderError) throw encoderError;
 
-          const tMs = Math.min(TOTAL_DURATION_MS, (f / (TOTAL_FRAMES - 1)) * TOTAL_DURATION_MS);
-          const clip1Prog = Math.min(1, tMs / 2966);
-          const clip2Prog = Math.max(0, Math.min(1, (tMs - 2975) / (TOTAL_DURATION_MS - 2975)));
-          await syncSourcesForExportFrame(clips, mediaSources, clip1Prog, clip2Prog);
+          const tMs = Math.min(totalDurationMs, (f / (totalFrames - 1)) * totalDurationMs);
+          await syncSourcesForExportFrame(clips, mediaSources, tMs, totalDurationMs);
 
           renderer.renderFrame(exportCanvas, {
             timeMs: tMs,
+            totalDurationMs,
             dimensions: exportDims,
             clips,
+            clipAssignments,
+            textEffects,
             mediaSources,
             textConfig,
-            motionParams,
             useWebGL,
           });
 
@@ -218,40 +234,28 @@ export async function exportTransitionVideo(params: {
           encoder.encode(videoFrame, { keyFrame: f % 30 === 0 });
           videoFrame.close();
 
-          if (f % 5 === 0 || f === TOTAL_FRAMES - 1) {
+          if (f % 5 === 0 || f === totalFrames - 1) {
             onProgress({
               frame: f + 1,
-              totalFrames: TOTAL_FRAMES,
-              percent: Math.round(((f + 1) / TOTAL_FRAMES) * 92),
+              totalFrames,
+              percent: Math.round(((f + 1) / totalFrames) * 92),
               stage: 'encoding',
             });
             await new Promise((r) => setTimeout(r, 0));
           }
         }
 
-        onProgress({
-          frame: TOTAL_FRAMES,
-          totalFrames: TOTAL_FRAMES,
-          percent: 96,
-          stage: 'muxing',
-        });
-
+        onProgress({ frame: totalFrames, totalFrames, percent: 96, stage: 'muxing' });
         await encoder.flush();
         encoder.close();
         muxer.finalize();
 
-        const buffer = muxer.target.buffer;
-        const blob = new Blob([buffer], { type: 'video/mp4' });
-        onProgress({
-          frame: TOTAL_FRAMES,
-          totalFrames: TOTAL_FRAMES,
-          percent: 100,
-          stage: 'done',
-        });
+        const blob = new Blob([muxer.target.buffer], { type: 'video/mp4' });
+        onProgress({ frame: totalFrames, totalFrames, percent: 100, stage: 'done' });
 
         return {
           blob,
-          filename: `kineticard-transition-60fps.mp4`,
+          filename: `kineticard-composable-60fps.mp4`,
           format: 'mp4',
           encoderUsed: 'webcodecs-mp4',
           durationMs: Math.round(performance.now() - startMs),
@@ -260,12 +264,7 @@ export async function exportTransitionVideo(params: {
         const webmCodec = codecPick.muxerCodec === 'V_VP8' ? 'V_VP8' : 'V_VP9';
         const muxer = new WebMMuxer.Muxer({
           target: new WebMMuxer.ArrayBufferTarget(),
-          video: {
-            codec: webmCodec,
-            width,
-            height,
-            frameRate: FPS,
-          },
+          video: { codec: webmCodec, width, height, frameRate: FPS },
           firstTimestampBehavior: 'offset',
         });
 
@@ -287,25 +286,25 @@ export async function exportTransitionVideo(params: {
 
         const frameDurationUs = Math.round(1_000_000 / FPS);
 
-        for (let f = 0; f < TOTAL_FRAMES; f++) {
+        for (let f = 0; f < totalFrames; f++) {
           if (abortSignal?.aborted) {
             encoder.close();
             throw new Error('Export cancelled');
           }
           if (encoderError) throw encoderError;
 
-          const tMs = Math.min(TOTAL_DURATION_MS, (f / (TOTAL_FRAMES - 1)) * TOTAL_DURATION_MS);
-          const clip1Prog = Math.min(1, tMs / 2966);
-          const clip2Prog = Math.max(0, Math.min(1, (tMs - 2975) / (TOTAL_DURATION_MS - 2975)));
-          await syncSourcesForExportFrame(clips, mediaSources, clip1Prog, clip2Prog);
+          const tMs = Math.min(totalDurationMs, (f / (totalFrames - 1)) * totalDurationMs);
+          await syncSourcesForExportFrame(clips, mediaSources, tMs, totalDurationMs);
 
           renderer.renderFrame(exportCanvas, {
             timeMs: tMs,
+            totalDurationMs,
             dimensions: exportDims,
             clips,
+            clipAssignments,
+            textEffects,
             mediaSources,
             textConfig,
-            motionParams,
             useWebGL,
           });
 
@@ -316,40 +315,28 @@ export async function exportTransitionVideo(params: {
           encoder.encode(videoFrame, { keyFrame: f % 30 === 0 });
           videoFrame.close();
 
-          if (f % 5 === 0 || f === TOTAL_FRAMES - 1) {
+          if (f % 5 === 0 || f === totalFrames - 1) {
             onProgress({
               frame: f + 1,
-              totalFrames: TOTAL_FRAMES,
-              percent: Math.round(((f + 1) / TOTAL_FRAMES) * 92),
+              totalFrames,
+              percent: Math.round(((f + 1) / totalFrames) * 92),
               stage: 'encoding',
             });
             await new Promise((r) => setTimeout(r, 0));
           }
         }
 
-        onProgress({
-          frame: TOTAL_FRAMES,
-          totalFrames: TOTAL_FRAMES,
-          percent: 96,
-          stage: 'muxing',
-        });
-
+        onProgress({ frame: totalFrames, totalFrames, percent: 96, stage: 'muxing' });
         await encoder.flush();
         encoder.close();
         muxer.finalize();
 
-        const buffer = muxer.target.buffer;
-        const blob = new Blob([buffer], { type: 'video/webm' });
-        onProgress({
-          frame: TOTAL_FRAMES,
-          totalFrames: TOTAL_FRAMES,
-          percent: 100,
-          stage: 'done',
-        });
+        const blob = new Blob([muxer.target.buffer], { type: 'video/webm' });
+        onProgress({ frame: totalFrames, totalFrames, percent: 100, stage: 'done' });
 
         return {
           blob,
-          filename: `kineticard-transition-60fps.webm`,
+          filename: `kineticard-composable-60fps.webm`,
           format: 'webm',
           encoderUsed: 'webcodecs-webm',
           durationMs: Math.round(performance.now() - startMs),
@@ -357,63 +344,51 @@ export async function exportTransitionVideo(params: {
       }
     }
 
-    // Fallback: Real-time MediaRecorder captureStream on Canvas
     const stream = exportCanvas.captureStream(FPS);
     const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
       ? 'video/webm;codecs=vp9'
       : 'video/webm';
-    const recorder = new MediaRecorder(stream, {
-      mimeType,
-      videoBitsPerSecond: 6_000_000,
-    });
-
+    const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 6_000_000 });
     const chunks: BlobPart[] = [];
     recorder.ondataavailable = (ev) => {
       if (ev.data.size > 0) chunks.push(ev.data);
     };
-
     const stopped = new Promise<Blob>((resolve) => {
       recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType }));
     });
-
     recorder.start();
     const stepMs = 1000 / FPS;
-    for (let f = 0; f < TOTAL_FRAMES; f++) {
+    for (let f = 0; f < totalFrames; f++) {
       if (abortSignal?.aborted) {
         recorder.stop();
         throw new Error('Export cancelled');
       }
-      const tMs = Math.min(TOTAL_DURATION_MS, (f / (TOTAL_FRAMES - 1)) * TOTAL_DURATION_MS);
+      const tMs = Math.min(totalDurationMs, (f / (totalFrames - 1)) * totalDurationMs);
       renderer.renderFrame(exportCanvas, {
         timeMs: tMs,
+        totalDurationMs,
         dimensions: exportDims,
         clips,
+        clipAssignments,
+        textEffects,
         mediaSources,
         textConfig,
-        motionParams,
         useWebGL,
       });
       onProgress({
         frame: f + 1,
-        totalFrames: TOTAL_FRAMES,
-        percent: Math.round(((f + 1) / TOTAL_FRAMES) * 95),
+        totalFrames,
+        percent: Math.round(((f + 1) / totalFrames) * 95),
         stage: 'encoding',
       });
       await new Promise((r) => setTimeout(r, stepMs));
     }
-
     recorder.stop();
     const blob = await stopped;
-    onProgress({
-      frame: TOTAL_FRAMES,
-      totalFrames: TOTAL_FRAMES,
-      percent: 100,
-      stage: 'done',
-    });
-
+    onProgress({ frame: totalFrames, totalFrames, percent: 100, stage: 'done' });
     return {
       blob,
-      filename: `kineticard-transition-60fps.webm`,
+      filename: `kineticard-composable-60fps.webm`,
       format: 'webm',
       encoderUsed: 'mediarecorder-webm',
       durationMs: Math.round(performance.now() - startMs),

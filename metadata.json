@@ -1,0 +1,6 @@
+{
+  "name": "KinetiCard Studio — 3D Floating Card & Neon Whip Transition",
+  "description": "100% Offline-First, WebGL & WebCodecs video transition studio implementing the Master 3D Floating Card & Neon Whip Cinematic Transition Flow.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

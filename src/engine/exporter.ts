@@ -212,7 +212,8 @@ export async function exportTransitionVideo(params: {
           }
           if (encoderError) throw encoderError;
 
-          const tMs = Math.min(totalDurationMs, (f / (totalFrames - 1)) * totalDurationMs);
+          const tSec = f / FPS;
+          const tMs = Math.min(totalDurationMs, f === totalFrames - 1 ? totalDurationMs : tSec * 1000);
           await syncSourcesForExportFrame(clips, mediaSources, tMs, totalDurationMs);
 
           renderer.renderFrame(exportCanvas, {
@@ -293,7 +294,8 @@ export async function exportTransitionVideo(params: {
           }
           if (encoderError) throw encoderError;
 
-          const tMs = Math.min(totalDurationMs, (f / (totalFrames - 1)) * totalDurationMs);
+          const tSec = f / FPS;
+          const tMs = Math.min(totalDurationMs, f === totalFrames - 1 ? totalDurationMs : tSec * 1000);
           await syncSourcesForExportFrame(clips, mediaSources, tMs, totalDurationMs);
 
           renderer.renderFrame(exportCanvas, {
@@ -363,7 +365,8 @@ export async function exportTransitionVideo(params: {
         recorder.stop();
         throw new Error('Export cancelled');
       }
-      const tMs = Math.min(totalDurationMs, (f / (totalFrames - 1)) * totalDurationMs);
+      const tSec = f / FPS;
+      const tMs = Math.min(totalDurationMs, f === totalFrames - 1 ? totalDurationMs : tSec * 1000);
       renderer.renderFrame(exportCanvas, {
         timeMs: tMs,
         totalDurationMs,

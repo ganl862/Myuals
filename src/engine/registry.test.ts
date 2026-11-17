@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { createDefaultDemoClips } from './mediaTimeline';
 import {
+  applyPacingPreset,
   canAddEffectWithoutWarning,
   createClipAssignment,
   createEffectInstance,
+  createSequenceTransition,
   cycleEffectPlacement,
+  deriveClipAssignmentsFromSequence,
   reorderEffectsList,
   SOFT_CAP_EFFECTS,
 } from './registry';
@@ -28,6 +32,37 @@ test('per-clip assignments maintain independent transitions and effects', () => 
 
   clip1.effects.push(createEffectInstance('cosmic-fire', 'behind-text'));
   assert.equal(clip2.effects.length, 0);
+});
+
+test('cohesive SequenceTransitionState syncs all clips while preserving independent per-clip effects', () => {
+  const clips = createDefaultDemoClips();
+  const base = createSequenceTransition('master-3d-neon-whip', 'balanced');
+  assert.equal(base.pacingPreset, 'balanced');
+  assert.equal(base.values.durationScale, 1.0);
+
+  const fast = applyPacingPreset(base, 'fast-edit');
+  assert.equal(fast.pacingPreset, 'fast-edit');
+  assert.ok(fast.values.durationScale < 1.0, 'Fast edit accelerates timeline pacing');
+  assert.ok(fast.values.whipBlurPx > base.values.whipBlurPx);
+
+  const hard = applyPacingPreset(base, 'hard-edit');
+  assert.equal(hard.pacingPreset, 'hard-edit');
+  assert.ok(hard.values.chromaticSplit > base.values.chromaticSplit);
+  assert.ok(hard.values.beatBrightness > base.values.beatBrightness);
+
+  const customClip0Fx = [createEffectInstance('beat-bloom', 'above-clip')];
+  const customClip1Fx = [createEffectInstance('chromatic-aberration', 'above-text')];
+  const derived = deriveClipAssignmentsFromSequence(clips, hard, {
+    [clips[0].id]: customClip0Fx,
+    [clips[1].id]: customClip1Fx,
+  });
+
+  for (const c of clips) {
+    assert.equal(derived[c.id].transitionId, 'master-3d-neon-whip');
+    assert.equal(derived[c.id].values.chromaticSplit, hard.values.chromaticSplit);
+  }
+  assert.deepEqual(derived[clips[0].id].effects, customClip0Fx);
+  assert.deepEqual(derived[clips[1].id].effects, customClip1Fx);
 });
 
 test('reorderEffectsList swaps items cleanly without mutating original array', () => {

@@ -29,40 +29,45 @@ import {
 } from './engine/mediaTimeline';
 import { computeTimelineState } from './engine/motionMath';
 import {
+  applyPacingPreset,
   AttachedEffectInstance,
-  ClipTransitionAssignment,
-  createClipAssignment,
   createDefaultSelects,
   createDefaultTextEffects,
   createDefaultToggles,
   createDefaultValues,
   createEffectInstance,
+  createSequenceTransition,
+  deriveClipAssignmentsFromSequence,
+  EditPacingPreset,
   EffectModifierId,
+  getDefaultEffectsForTransition,
+  getEffectDef,
   getTransitionDef,
+  SequenceTransitionState,
   TextTargetSlot,
   TransitionModuleId,
 } from './engine/registry';
 import { DEFAULT_TEXT_CONFIG, TextLayerConfig } from './engine/typography';
 
-function buildInitialAssignments(clips: MediaClipItem[]): Record<string, ClipTransitionAssignment> {
-  const out: Record<string, ClipTransitionAssignment> = {};
-  clips.forEach((clip, idx) => {
-    const defId: TransitionModuleId =
-      idx === 0
-        ? 'master-3d-neon-whip'
-        : idx === 1
-          ? 'smooth-zoom-out-tilt'
-          : 'fake-zoom-geo-slide';
-    out[clip.id] = createClipAssignment(defId);
-  });
+function buildInitialClipEffects(
+  clips: MediaClipItem[],
+  transitionId: TransitionModuleId
+): Record<string, AttachedEffectInstance[]> {
+  const out: Record<string, AttachedEffectInstance[]> = {};
+  for (const clip of clips) {
+    out[clip.id] = getDefaultEffectsForTransition(transitionId);
+  }
   return out;
 }
 
 export default function App() {
   const [clips, setClips] = useState<MediaClipItem[]>(() => createDefaultDemoClips());
-  const [clipAssignments, setClipAssignments] = useState<
-    Record<string, ClipTransitionAssignment>
-  >(() => buildInitialAssignments(createDefaultDemoClips()));
+  const [sequenceTransition, setSequenceTransition] = useState<SequenceTransitionState>(() =>
+    createSequenceTransition('master-3d-neon-whip', 'balanced')
+  );
+  const [clipEffects, setClipEffects] = useState<Record<string, AttachedEffectInstance[]>>(() =>
+    buildInitialClipEffects(createDefaultDemoClips(), 'master-3d-neon-whip')
+  );
   const [textEffects, setTextEffects] = useState<AttachedEffectInstance[]>(() =>
     createDefaultTextEffects()
   );
@@ -109,46 +114,49 @@ export default function App() {
     }
   }, [clips]);
 
-  // Ensure every clip always has an assignment entry
+  // Ensure every clip always has an effects entry (cleaning up removed IDs)
   useEffect(() => {
-    setClipAssignments((prev) => {
+    setClipEffects((prev) => {
       let changed = false;
-      const next = { ...prev };
-      clips.forEach((c, idx) => {
+      const validIds = new Set(clips.map((c) => c.id));
+      const next: Record<string, AttachedEffectInstance[]> = {};
+      for (const [id, fxList] of Object.entries(prev)) {
+        if (validIds.has(id)) {
+          next[id] = fxList;
+        } else {
+          changed = true;
+        }
+      }
+      for (const c of clips) {
         if (!next[c.id]) {
           changed = true;
-          next[c.id] = createClipAssignment(
-            idx === 0
-              ? 'master-3d-neon-whip'
-              : idx === 1
-                ? 'smooth-zoom-out-tilt'
-                : 'fake-zoom-geo-slide'
-          );
+          next[c.id] = getDefaultEffectsForTransition(sequenceTransition.transitionId);
         }
-      });
+      }
       return changed ? next : prev;
     });
-  }, [clips]);
+  }, [clips, sequenceTransition.transitionId]);
+
+  const clipAssignments = useMemo(
+    () => deriveClipAssignmentsFromSequence(clips, sequenceTransition, clipEffects),
+    [clips, sequenceTransition, clipEffects]
+  );
 
   const isCosmicActive = useMemo(
-    () => isCosmicSlideActive(clips, clipAssignments),
-    [clips, clipAssignments]
+    () =>
+      sequenceTransition.transitionId === 'cosmic_slide_3d' ||
+      isCosmicSlideActive(clips, clipAssignments),
+    [sequenceTransition.transitionId, clips, clipAssignments]
   );
 
   const hasClassicTextActive = useMemo(() => {
-    return clips.some((clip) => {
-      const id = clipAssignments[clip.id]?.transitionId ?? 'master-3d-neon-whip';
-      return id !== 'cosmic_slide_3d' && getTransitionDef(id).hasTextLayer;
-    });
-  }, [clips, clipAssignments]);
+    return (
+      sequenceTransition.transitionId !== 'cosmic_slide_3d' &&
+      getTransitionDef(sequenceTransition.transitionId).hasTextLayer
+    );
+  }, [sequenceTransition.transitionId]);
 
-  const hasTextLayer = useMemo(() => {
-    return clips.some((clip) => {
-      const assign = clipAssignments[clip.id];
-      if (!assign) return true;
-      return getTransitionDef(assign.transitionId).hasTextLayer;
-    });
-  }, [clips, clipAssignments]);
+  const hasTextLayer = true;
 
   const totalDurationMs = useMemo(
     () => resolveActiveDurationMs(clips, clipAssignments),
@@ -380,6 +388,8 @@ export default function App() {
       );
       if (loaded.length === 0) return;
 
+      const activeTransId = sequenceTransition.transitionId;
+
       setClips((prev) => {
         if (typeof replaceIndex === 'number' && prev[replaceIndex]) {
           const next = [...prev];
@@ -387,28 +397,25 @@ export default function App() {
           if (old.srcUrl) URL.revokeObjectURL(old.srcUrl);
           mediaSourcesRef.current.delete(old.id);
           next[replaceIndex] = loaded[0];
-          setClipAssignments((aPrev) => {
-            const aNext = { ...aPrev };
-            const oldAssign = aNext[old.id];
-            delete aNext[old.id];
-            aNext[loaded[0].id] =
-              oldAssign ??
-              createClipAssignment(
-                replaceIndex === 0 ? 'master-3d-neon-whip' : 'smooth-zoom-out-tilt'
-              );
-            return aNext;
+          setClipEffects((fxPrev) => {
+            const fxNext = { ...fxPrev };
+            const oldEffects = fxNext[old.id];
+            delete fxNext[old.id];
+            fxNext[loaded[0].id] =
+              oldEffects ?? getDefaultEffectsForTransition(activeTransId);
+            return fxNext;
           });
           return next;
         }
 
-        // Bulk upload of 2 or 3 files replaces the sequence cleanly
+        // Bulk upload of 2 or 3 files replaces the sequence cleanly while keeping active cohesive transition
         if (loaded.length >= 2) {
           for (const old of prev) {
             if (old.srcUrl) URL.revokeObjectURL(old.srcUrl);
             mediaSourcesRef.current.delete(old.id);
           }
           const nextClips = loaded.slice(0, 3);
-          setClipAssignments(buildInitialAssignments(nextClips));
+          setClipEffects(buildInitialClipEffects(nextClips, activeTransId));
           setActiveContext('clip-0');
           return nextClips;
         }
@@ -421,18 +428,16 @@ export default function App() {
             mediaSourcesRef.current.delete(old.id);
           }
           const single = [loaded[0]];
-          setClipAssignments(buildInitialAssignments(single));
+          setClipEffects(buildInitialClipEffects(single, activeTransId));
           setActiveContext('clip-0');
           return single;
         }
 
         if (prev.length < 3) {
           const appended = [...prev, loaded[0]];
-          setClipAssignments((aPrev) => ({
-            ...aPrev,
-            [loaded[0].id]: createClipAssignment(
-              appended.length === 2 ? 'smooth-zoom-out-tilt' : 'fake-zoom-geo-slide'
-            ),
+          setClipEffects((fxPrev) => ({
+            ...fxPrev,
+            [loaded[0].id]: getDefaultEffectsForTransition(activeTransId),
           }));
           setActiveContext(appended.length === 2 ? 'clip-1' : 'clip-2');
           return appended;
@@ -443,17 +448,17 @@ export default function App() {
         mediaSourcesRef.current.delete(next[0].id);
         const oldId = next[0].id;
         next[0] = loaded[0];
-        setClipAssignments((aPrev) => {
-          const aNext = { ...aPrev };
-          const preserved = aNext[oldId];
-          delete aNext[oldId];
-          aNext[loaded[0].id] = preserved ?? createClipAssignment('master-3d-neon-whip');
-          return aNext;
+        setClipEffects((fxPrev) => {
+          const fxNext = { ...fxPrev };
+          const preserved = fxNext[oldId];
+          delete fxNext[oldId];
+          fxNext[loaded[0].id] = preserved ?? getDefaultEffectsForTransition(activeTransId);
+          return fxNext;
         });
         return next;
       });
     },
-    [loadSingleLocalFile]
+    [loadSingleLocalFile, sequenceTransition.transitionId]
   );
 
   const handleUploadFont = useCallback(async (file: File) => {
@@ -517,9 +522,12 @@ export default function App() {
         ? 2
         : 0;
   const activeClip = activeContext === 'text' ? null : (clips[activeClipIndex] ?? null);
-  const activeAssignment = activeClip ? (clipAssignments[activeClip.id] ?? null) : null;
   const activeEffects =
-    activeContext === 'text' ? textEffects : (activeAssignment?.effects ?? []);
+    activeContext === 'text'
+      ? textEffects
+      : activeClip
+        ? (clipEffects[activeClip.id] ?? [])
+        : [];
 
   const handleSelectContext = useCallback(
     (ctx: ActiveContextKey) => {
@@ -533,109 +541,90 @@ export default function App() {
     []
   );
 
-  const handleSelectClipTransition = useCallback(
-    (clipId: string, transitionId: TransitionModuleId) => {
-      const def = getTransitionDef(transitionId);
+  const handleSelectSequenceTransition = useCallback(
+    (transitionId: TransitionModuleId) => {
+      setIsPlaying(false);
       setTimeMs(0);
-      setClipAssignments((prev) => {
-        const next: Record<string, ClipTransitionAssignment> = {
-          ...prev,
-          [clipId]: {
-            transitionId,
-            values: createDefaultValues(def.params),
-            toggles: createDefaultToggles(def.toggles),
-            selects: createDefaultSelects(def.selects),
-            effects: createClipAssignment(transitionId).effects,
-          },
-        };
-        if (transitionId === 'cosmic_slide_3d' && clips[0]?.id === clipId && clips[1]) {
-          const c2Prev = prev[clips[1].id];
-          if (!c2Prev || c2Prev.transitionId === 'smooth-zoom-out-tilt') {
-            next[clips[1].id] = createClipAssignment('focus_pulse_shake');
-          }
-        }
-        return next;
-      });
+      setSequenceTransition((prev) => createSequenceTransition(transitionId, prev.pacingPreset));
+      setClipEffects(() => buildInitialClipEffects(clips, transitionId));
     },
     [clips]
   );
 
-  const handleUpdateClipTransitionParam = useCallback(
-    (clipId: string, key: string, value: number) => {
-      setClipAssignments((prev) => {
-        const existing = prev[clipId];
-        if (!existing) return prev;
-        return {
-          ...prev,
-          [clipId]: {
-            ...existing,
-            values: {
-              ...existing.values,
-              [key]: value,
-            },
-          },
-        };
-      });
-    },
-    []
-  );
+  const handleChangePacingPreset = useCallback((preset: EditPacingPreset) => {
+    setSequenceTransition((prev) => applyPacingPreset(prev, preset));
+  }, []);
 
-  const handleUpdateClipTransitionToggle = useCallback(
-    (clipId: string, key: string, value: boolean) => {
-      setClipAssignments((prev) => {
-        const existing = prev[clipId];
-        if (!existing) return prev;
-        return {
-          ...prev,
-          [clipId]: {
-            ...existing,
-            toggles: {
-              ...(existing.toggles ?? {}),
-              [key]: value,
-            },
-          },
-        };
-      });
-    },
-    []
-  );
+  const handleResetSequenceTransition = useCallback(() => {
+    setTimeMs(0);
+    setSequenceTransition((prev) => createSequenceTransition(prev.transitionId, 'balanced'));
+  }, []);
 
-  const handleUpdateClipTransitionSelect = useCallback(
-    (clipId: string, key: string, value: string) => {
-      setClipAssignments((prev) => {
-        const existing = prev[clipId];
-        if (!existing) return prev;
-        return {
-          ...prev,
-          [clipId]: {
-            ...existing,
-            selects: {
-              ...(existing.selects ?? {}),
-              [key]: value,
-            },
-          },
-        };
-      });
-    },
-    []
-  );
+  const handleUpdateSequenceParam = useCallback((key: string, value: number) => {
+    setSequenceTransition((prev) => ({
+      ...prev,
+      values: {
+        ...prev.values,
+        [key]: value,
+      },
+    }));
+  }, []);
+
+  const handleUpdateSequenceToggle = useCallback((key: string, value: boolean) => {
+    setSequenceTransition((prev) => ({
+      ...prev,
+      toggles: {
+        ...prev.toggles,
+        [key]: value,
+      },
+    }));
+  }, []);
+
+  const handleUpdateSequenceSelect = useCallback((key: string, value: string) => {
+    setSequenceTransition((prev) => ({
+      ...prev,
+      selects: {
+        ...prev.selects,
+        [key]: value,
+      },
+    }));
+  }, []);
 
   const handleUpdateActiveEffects = useCallback(
     (next: AttachedEffectInstance[]) => {
       if (activeContext === 'text') {
         setTextEffects(next);
       } else if (activeClip) {
-        setClipAssignments((prev) => {
-          const existing = prev[activeClip.id];
-          if (!existing) return prev;
-          return {
-            ...prev,
-            [activeClip.id]: {
-              ...existing,
-              effects: next,
-            },
-          };
-        });
+        setClipEffects((prev) => ({
+          ...prev,
+          [activeClip.id]: next,
+        }));
+      }
+    },
+    [activeContext, activeClip]
+  );
+
+  const handleResetEffect = useCallback(
+    (instanceId: string) => {
+      const resetItem = (item: AttachedEffectInstance): AttachedEffectInstance => {
+        if (item.instanceId !== instanceId) return item;
+        const def = getEffectDef(item.effectId);
+        return {
+          ...item,
+          values: createDefaultValues(def.params),
+          toggles: createDefaultToggles(def.toggles),
+          selects: createDefaultSelects(def.selects),
+          colorHex: def.defaultColorHex,
+        };
+      };
+
+      if (activeContext === 'text') {
+        setTextEffects((prev) => prev.map(resetItem));
+      } else if (activeClip) {
+        setClipEffects((prev) => ({
+          ...prev,
+          [activeClip.id]: (prev[activeClip.id] ?? []).map(resetItem),
+        }));
       }
     },
     [activeContext, activeClip]
@@ -643,25 +632,23 @@ export default function App() {
 
   const handleAddEffect = useCallback(
     (effectId: EffectModifierId, targetSlot?: TextTargetSlot) => {
+      const resolvedSlot: TextTargetSlot | undefined =
+        activeContext === 'text' ? (targetSlot ?? 'overlayText') : undefined;
       const instance = createEffectInstance(
         effectId,
         activeContext === 'text' ? 'behind-text' : undefined,
-        activeContext === 'text' ? (targetSlot ?? 'all') : undefined
+        resolvedSlot
       );
       if (activeContext === 'text') {
         setTextEffects((prev) => [...prev, instance]);
+        if (effectId === 'cosmic_fire_glow' && (resolvedSlot === 'overlayText' || resolvedSlot === 'all')) {
+          setTextConfig((prev) => ({ ...prev, overlayTextEnabled: true }));
+        }
       } else if (activeClip) {
-        setClipAssignments((prev) => {
-          const existing = prev[activeClip.id];
-          if (!existing) return prev;
-          return {
-            ...prev,
-            [activeClip.id]: {
-              ...existing,
-              effects: [...existing.effects, instance],
-            },
-          };
-        });
+        setClipEffects((prev) => ({
+          ...prev,
+          [activeClip.id]: [...(prev[activeClip.id] ?? []), instance],
+        }));
       }
     },
     [activeContext, activeClip]
@@ -721,13 +708,15 @@ export default function App() {
               clips={clips}
               activeClip={activeClip}
               activeClipIndex={activeClipIndex}
-              activeAssignment={activeAssignment}
+              sequenceTransition={sequenceTransition}
               activeEffects={activeEffects}
               textConfig={textConfig}
-              onSelectClipTransition={handleSelectClipTransition}
-              onUpdateClipTransitionParam={handleUpdateClipTransitionParam}
-              onUpdateClipTransitionToggle={handleUpdateClipTransitionToggle}
-              onUpdateClipTransitionSelect={handleUpdateClipTransitionSelect}
+              onSelectSequenceTransition={handleSelectSequenceTransition}
+              onChangePacingPreset={handleChangePacingPreset}
+              onResetSequenceTransition={handleResetSequenceTransition}
+              onUpdateSequenceParam={handleUpdateSequenceParam}
+              onUpdateSequenceToggle={handleUpdateSequenceToggle}
+              onUpdateSequenceSelect={handleUpdateSequenceSelect}
               onUpdateImageDuration={(id, dur) =>
                 setClips((prev) =>
                   prev.map((c) => (c.id === id ? updateImageClipDuration(c, dur) : c))
@@ -745,16 +734,17 @@ export default function App() {
                   const target = prev.find((c) => c.id === id);
                   if (target?.srcUrl) URL.revokeObjectURL(target.srcUrl);
                   mediaSourcesRef.current.delete(id);
-                  setClipAssignments((aPrev) => {
-                    const aNext = { ...aPrev };
-                    delete aNext[id];
-                    return aNext;
+                  setClipEffects((fxPrev) => {
+                    const fxNext = { ...fxPrev };
+                    delete fxNext[id];
+                    return fxNext;
                   });
                   setActiveContext('clip-0');
                   return prev.filter((c) => c.id !== id);
                 })
               }
               onUpdateActiveEffects={handleUpdateActiveEffects}
+              onResetEffect={handleResetEffect}
               onAddEffect={handleAddEffect}
               onChangeTextConfig={setTextConfig}
               onUploadFont={handleUploadFont}

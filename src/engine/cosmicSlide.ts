@@ -1,4 +1,15 @@
-import { clamp, cubicBezier, lerp, smoothstep } from './motionMath';
+import {
+  CosmicFireGlowEngine,
+  CosmicFireGlowParams,
+} from './cosmicFireGlow';
+import {
+  clamp,
+  cubicBezier,
+  cubicBezierVelocity,
+  EDITORIAL_CURVES,
+  lerp,
+  smoothstep,
+} from './motionMath';
 import { mulberry32, seededWaveNoise } from './prng';
 import { getResolvedFontFamily, hexToRgba, isRtlText } from './typography';
 
@@ -64,6 +75,9 @@ export interface CosmicSlideTextData {
   accentColor: string; // default "#FF2D2D"
   line1Color: string; // default "#FFFFFF"
   customFontFamily: string | null;
+  fontScaleMultiplier?: number;
+  cosmicFireEngine?: CosmicFireGlowEngine;
+  fireSlots?: Partial<Record<'cosmicTitle' | 'cosmicLine1' | 'cosmicLine2', CosmicFireGlowParams>>;
 }
 
 export interface FocusPulseState {
@@ -184,18 +198,18 @@ export function computeFocusPulseState(
     'shakeEnabled' | 'shakeStrength' | 'zoomPunchAmount' | 'focusPulseEnabled'
   >
 ): FocusPulseState {
-  // Zoom punch: 1.00 -> zoomPunchAmount (1.28) over 5.00->5.35 (easeOutExpo),
-  // then slow creep 1.28 -> 1.55 until 6.20 (easeOutCubic)
+  // Zoom punch: 1.00 -> zoomPunchAmount (1.28) over 5.00->5.35 (heavyExpoOut),
+  // then smooth velvet creep 1.28 -> 1.55 until 6.20 (silkZoomOut)
   let zoomScale = 1.0;
   if (tRef >= 5.0) {
     const punchTarget = params.zoomPunchAmount;
     const creepTarget = punchTarget + 0.27;
     if (tRef < 5.35) {
       const p = clamp((tRef - 5.0) / 0.35);
-      zoomScale = lerp(1.0, punchTarget, easeOutExpo(p));
+      zoomScale = lerp(1.0, punchTarget, cubicBezier(...EDITORIAL_CURVES.heavyExpoOut, p));
     } else if (tRef < 6.2) {
       const p = clamp((tRef - 5.35) / (6.2 - 5.35));
-      zoomScale = lerp(punchTarget, creepTarget, easeOutCubic(p));
+      zoomScale = lerp(punchTarget, creepTarget, cubicBezier(...EDITORIAL_CURVES.silkZoomOut, p));
     } else {
       zoomScale = creepTarget;
     }
@@ -302,10 +316,10 @@ export function computeCosmicSlideState(
   }
 
   const picAWidthFrac = piecewiseEaseOut(tRef, [
-    [0.3, 0.46],
-    [1.05, 0.55],
-    [1.5, 0.66],
-    [2.0, 0.7],
+    [0.3, 0.54],
+    [1.05, 0.66],
+    [1.5, 0.76],
+    [2.0, 0.80],
   ]);
 
   const picARotateYDeg = piecewiseEaseOut(tRef, [
@@ -319,17 +333,24 @@ export function computeCosmicSlideState(
   const picADollyScale =
     tRef <= 0.25 ? 1.0 : tRef < 2.0 ? lerp(1.0, 1.03, (tRef - 0.25) / (2.0 - 0.25)) : 1.03;
 
-  // 6a & 6b) Slide A -> B (2.00 -> 3.00, easeInCubic accelerating)
+  // 6a & 6b) Slide A -> B (2.00 -> 3.00, weighted editorial whip-out curve)
   let slideAFrac = 0;
   let picAMotionBlurPx = 0;
   let picATextScaleX = 1.0;
   if (tRef >= 2.0 && tRef <= 3.05) {
     const s = clamp((tRef - 2.0) / 1.0);
-    slideAFrac = 1.1 * easeInCubic(s);
-    // Peak directional blur ~2.55 -> 60px * strength
-    const blurEnv = tRef < 2.55 ? smoothstep(2.0, 2.55, tRef) : 1 - smoothstep(2.55, 3.0, tRef);
-    picAMotionBlurPx = 60 * clamp(blurEnv, 0, 1) * params.motionBlurStrength;
-    picATextScaleX = 1 + 0.08 * clamp(blurEnv, 0, 1);
+    const whipCurve = lerp(
+      easeInCubic(s),
+      cubicBezier(...EDITORIAL_CURVES.heavyWhipOut, s),
+      0.55
+    );
+    slideAFrac = 1.1 * whipCurve;
+    const whipVel = cubicBezierVelocity(...EDITORIAL_CURVES.heavyWhipOut, s);
+    // Peak directional blur ~2.55 -> 60px * strength coupled with curve velocity
+    const bellEnv = tRef < 2.55 ? smoothstep(2.0, 2.55, tRef) : 1 - smoothstep(2.55, 3.0, tRef);
+    const blurEnv = clamp(bellEnv * (0.78 + whipVel * 0.16), 0, 1);
+    picAMotionBlurPx = 60 * blurEnv * params.motionBlurStrength;
+    picATextScaleX = 1 + 0.08 * blurEnv;
   }
   const offA = slideOffsetFrac(slideAFrac, params.slideDirection);
   const picACenterXFrac = 0.52 + offA.dx;
@@ -409,7 +430,7 @@ export function computeCosmicSlideState(
       return lerp(-0.2, 0.35, cubicBezier(0.16, 1, 0.3, 1, p));
     }
     const p = clamp((sampleT - 4.5) / 1.7);
-    return lerp(0.35, 0.5, cubicBezier(0.16, 1, 0.3, 1, p));
+    return lerp(0.35, 0.5, cubicBezier(...EDITORIAL_CURVES.silkZoomOut, p));
   };
 
   const bProgressAlong = evalPicBPos(tRef);
@@ -419,13 +440,17 @@ export function computeCosmicSlideState(
   const picBCenterYFrac = 0.5 - oppOff.dy;
 
   const picBBlurPx =
-    tRef < 3.35 ? 40 : tRef < 4.2 ? 40 * (1 - easeOutCubic((tRef - 3.35) / (4.2 - 3.35))) : 0;
+    tRef < 3.35
+      ? 40
+      : tRef < 4.2
+        ? 40 * (1 - cubicBezier(0.38, 0.12, 0.22, 1.0, (tRef - 3.35) / (4.2 - 3.35)))
+        : 0;
 
   const picBWidthFrac = piecewiseEaseOut(tRef, [
-    [3.3, 0.55],
-    [3.6, 0.55],
-    [4.5, 0.6],
-    [5.0, 0.58],
+    [3.3, 0.64],
+    [3.6, 0.68],
+    [4.5, 0.74],
+    [5.0, 0.74],
   ]);
   const picBRotateYDeg = piecewiseEaseOut(tRef, [
     [3.3, -8.0],
@@ -865,13 +890,28 @@ export function drawPictureCard3D(
     scratchCtx.clearRect(0, 0, bufW, bufH);
   }
 
-  // 1. Render picture + 6px thin dark frame into scratch buffer
-  const borderPx = Math.max(2, 6 * opts.scaleH);
+  // 1. Render picture + atmospheric inner vignette + dark cinema frame into scratch buffer
+  const borderPx = Math.max(2, 5 * opts.scaleH);
   scratchCtx.save();
   drawSourceFn(scratchCtx, drawW, drawH);
 
-  // Thin dark border frame (~6px)
-  scratchCtx.strokeStyle = 'rgba(10, 7, 9, 0.92)';
+  // Subtle dark edge vignette inside card for authentic cinema depth
+  const innerVig = scratchCtx.createRadialGradient(
+    pad + drawW * 0.5,
+    pad + drawH * 0.46,
+    Math.min(drawW, drawH) * 0.24,
+    pad + drawW * 0.5,
+    pad + drawH * 0.5,
+    Math.max(drawW, drawH) * 0.72
+  );
+  innerVig.addColorStop(0, 'rgba(0,0,0,0)');
+  innerVig.addColorStop(0.7, 'rgba(8,4,6,0.22)');
+  innerVig.addColorStop(1, 'rgba(4,2,5,0.68)');
+  scratchCtx.fillStyle = innerVig;
+  scratchCtx.fillRect(pad, pad, drawW, drawH);
+
+  // Thin dark cinema matte border (~5px)
+  scratchCtx.strokeStyle = 'rgba(8, 5, 8, 0.94)';
   scratchCtx.lineWidth = borderPx;
   scratchCtx.strokeRect(
     pad + borderPx * 0.5,
@@ -919,8 +959,8 @@ export function drawPictureCard3D(
     scratchCtx.restore();
   }
 
-  // 2. Apply 6% soft feather/fade on all 4 edges into background
-  const feather = clamp(opts.edgeFeatherAmount, 0, 0.2);
+  // 2. Apply soft cinema feather on all 4 edges into dark space
+  const feather = clamp(opts.edgeFeatherAmount > 0 ? Math.max(0.08, opts.edgeFeatherAmount * 1.45) : 0, 0, 0.24);
   if (feather > 0.005) {
     scratchCtx.globalCompositeOperation = 'destination-in';
     const hMask = scratchCtx.createLinearGradient(pad, 0, pad + drawW, 0);
@@ -1024,14 +1064,15 @@ export function drawPictureCard3D(
     ctx.restore();
   }
 
-  // Neon Red Outline (Picture B 4.9 -> 5.3)
+  // Cinema Double Rim Outline (Picture B 4.9 -> 5.3) — subtle optical edge halo instead of flat neon stroke
   if (opts.neonOutlineOpacity > 0.01) {
     ctx.save();
-    ctx.globalAlpha = opts.opacity * opts.neonOutlineOpacity;
-    ctx.shadowColor = opts.accentColor;
-    ctx.shadowBlur = 18 * opts.scaleH;
-    ctx.strokeStyle = opts.accentColor;
-    ctx.lineWidth = Math.max(2, 3 * opts.scaleH);
+    ctx.globalCompositeOperation = 'screen';
+    ctx.globalAlpha = opts.opacity * opts.neonOutlineOpacity * 0.55;
+    ctx.shadowColor = hexToRgba(opts.accentColor, 0.65);
+    ctx.shadowBlur = 22 * opts.scaleH;
+    ctx.strokeStyle = hexToRgba(opts.accentColor, 0.42);
+    ctx.lineWidth = Math.max(1.2, 2.2 * opts.scaleH);
     drawTrapezoidPath();
     ctx.stroke();
     ctx.restore();
@@ -1119,7 +1160,7 @@ export class KarbalaCosmicSlideEngine {
     // --- L3/L5/L6: PICTURE A + TITLE ("كربلاء") ---
     if (state.picAVisible) {
       const boxW = w * state.picAWidthFrac;
-      const boxH = h * 0.72;
+      const boxH = h * 0.78;
       const padA = Math.round(36 * scaleH);
       const cxA = w * state.picACenterXFrac;
       const cyA = h * state.picACenterYFrac;
@@ -1157,7 +1198,7 @@ export class KarbalaCosmicSlideEngine {
 
       // L6 Title ("كربلاء") travels with Picture A
       if (state.titleVisible && textData.titleText.trim()) {
-        this.drawTitleOnPictureA(ctx, w, h, state, params, textData, scaleH);
+        this.drawTitleOnPictureA(ctx, w, h, state, params, textData, scaleH, timeSec);
       }
     }
 
@@ -1165,7 +1206,7 @@ export class KarbalaCosmicSlideEngine {
     if (state.picBVisible) {
       const fp = state.focusPulse;
       const boxW = w * state.picBWidthFrac;
-      const boxH = h * 0.72;
+      const boxH = h * 0.78;
       const cxB = w * state.picBCenterXFrac;
       const cyB = h * state.picBCenterYFrac;
       const padB = Math.round(36 * scaleH);
@@ -1250,8 +1291,29 @@ export class KarbalaCosmicSlideEngine {
         }
       );
 
+      // Center optical prism lens glint around 4.35..5.10s (matching sheet_03 t=4.500-5.000)
+      if (params.lensFlareEnabled && state.tRef >= 4.35 && state.tRef <= 5.15) {
+        const gEnv = Math.sin(clamp((state.tRef - 4.35) / 0.8) * Math.PI);
+        if (gEnv > 0.02) {
+          ctx.save();
+          ctx.globalCompositeOperation = 'screen';
+          ctx.globalAlpha = gEnv * 0.42;
+          const glintR = Math.min(w, h) * 0.14;
+          const glint = ctx.createRadialGradient(cxB, cyB + h * 0.03, 0, cxB, cyB + h * 0.03, glintR);
+          glint.addColorStop(0, 'rgba(200, 255, 220, 0.92)');
+          glint.addColorStop(0.28, 'rgba(110, 235, 175, 0.42)');
+          glint.addColorStop(0.65, hexToRgba(textData.accentColor, 0.18));
+          glint.addColorStop(1, 'rgba(0,0,0,0)');
+          ctx.fillStyle = glint;
+          ctx.beginPath();
+          ctx.arc(cxB, cyB + h * 0.03, glintR, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        }
+      }
+
       // L6: Line 1 ("دار النوايب") & Line 2 ("والبلى") move/scale/blur with Picture B
-      this.drawTextsOnPictureB(ctx, w, h, cxB, cyB, boxW, boxH, clipBAspect, state, params, textData, scaleH);
+      this.drawTextsOnPictureB(ctx, w, h, cxB, cyB, boxW, boxH, clipBAspect, state, params, textData, scaleH, timeSec);
 
       ctx.restore();
     }
@@ -1272,18 +1334,48 @@ export class KarbalaCosmicSlideEngine {
     state: CosmicSlideState,
     params: CosmicSlideParams,
     textData: CosmicSlideTextData,
-    scaleH: number
+    scaleH: number,
+    timeSec: number
   ) {
     const title = textData.titleText.trim();
     const rtl = isRtlText(title);
     const fontFamily = getResolvedFontFamily(textData.customFontFamily, rtl);
-    const fontSize = Math.round(h * 0.09);
+    const fontMult = textData.fontScaleMultiplier ?? 1.0;
+    const fontSize = Math.round(h * 0.092 * fontMult);
 
     // Position locked to Picture A: (0.53W, 0.62H) shifted by Picture A slide offset
     const offsetX = (state.picACenterXFrac - 0.52) * w;
     const offsetY = (state.picACenterYFrac - 0.47) * h;
     const titleX = w * 0.53 + offsetX;
     const titleY = h * 0.62 + offsetY;
+
+    const p = state.titleAssemblyProgress;
+    const fireTitle = textData.fireSlots?.cosmicTitle;
+    if (fireTitle && textData.cosmicFireEngine && p >= 0.999) {
+      ctx.save();
+      ctx.translate(titleX, titleY);
+      ctx.rotate((state.picARotateZDeg * 0.65 * Math.PI) / 180);
+      ctx.scale(state.picATextScaleX * state.picADollyScale, state.picADollyScale);
+      if (state.picAMotionBlurPx * scaleH > 3) {
+        ctx.filter = `blur(${Math.min(12, state.picAMotionBlurPx * scaleH * 0.14).toFixed(1)}px)`;
+      }
+      textData.cosmicFireEngine.render(ctx, {
+        text: title,
+        fontSizePx: fontSize,
+        fontFamily,
+        anchorX: 0,
+        anchorY: 0,
+        canvasWidth: w,
+        canvasHeight: h,
+        timeSec,
+        durationSec: params.durationSec,
+        params: { ...fireTitle, textColor: textData.accentColor },
+        effectEnabled: true,
+      });
+      ctx.filter = 'none';
+      ctx.restore();
+      return;
+    }
 
     // 1. Pre-shape complete Arabic word on wordCanvas so joining & 'لا' ligatures stay 100% genuine
     this.wordCtx.font = `700 ${fontSize}px ${fontFamily}`;
@@ -1310,8 +1402,6 @@ export class KarbalaCosmicSlideEngine {
     this.wordCtx.fillStyle = textData.accentColor;
     this.wordCtx.fillText(title, glowPad, wordBufH * 0.5);
     this.wordCtx.restore();
-
-    const p = state.titleAssemblyProgress;
 
     // If fully assembled (t >= 1.40), draw unified pre-shaped word with smooth optical slide smear if exiting
     if (p >= 0.999) {
@@ -1410,7 +1500,7 @@ export class KarbalaCosmicSlideEngine {
 
   private drawTextsOnPictureB(
     ctx: CanvasRenderingContext2D,
-    _w: number,
+    w: number,
     h: number,
     cxB: number,
     cyB: number,
@@ -1420,7 +1510,8 @@ export class KarbalaCosmicSlideEngine {
     state: CosmicSlideState,
     params: CosmicSlideParams,
     textData: CosmicSlideTextData,
-    scaleH: number
+    scaleH: number,
+    timeSec: number
   ) {
     const line1 = textData.line1Text.trim();
     const line2 = textData.line2Text.trim();
@@ -1433,7 +1524,8 @@ export class KarbalaCosmicSlideEngine {
       picW = picH * Math.max(0.1, clipBAspect);
     }
 
-    const fontSize = Math.round(h * 0.07);
+    const fontMult = textData.fontScaleMultiplier ?? 1.0;
+    const fontSize = Math.round(h * 0.072 * fontMult);
     const rtl = isRtlText(line1 + line2);
     const fontFamily = getResolvedFontFamily(textData.customFontFamily, rtl);
 
@@ -1458,16 +1550,35 @@ export class KarbalaCosmicSlideEngine {
       l2X = rightAnchor;
     }
 
+    const fireL1 = textData.fireSlots?.cosmicLine1;
+    const fireL2 = textData.fireSlots?.cosmicLine2;
+
     if (line1 && state.line1Opacity > 0.01) {
       ctx.save();
       ctx.globalAlpha = state.line1Opacity;
-      ctx.textAlign = 'right';
       const blur1 = (state.line1BlurPx + state.focusPulse.blurPx) * scaleH;
       if (blur1 > 0.35) ctx.filter = `blur(${blur1.toFixed(1)}px)`;
-      ctx.shadowColor = hexToRgba(textData.line1Color, 0.5);
-      ctx.shadowBlur = 8 * scaleH;
-      ctx.fillStyle = textData.line1Color;
-      ctx.fillText(line1, rightAnchor, baseLineY);
+      if (fireL1 && textData.cosmicFireEngine) {
+        textData.cosmicFireEngine.render(ctx, {
+          text: line1,
+          fontSizePx: fontSize,
+          fontFamily,
+          anchorX: rightAnchor - l1Width * 0.5,
+          anchorY: baseLineY,
+          canvasWidth: w,
+          canvasHeight: h,
+          timeSec,
+          durationSec: params.durationSec,
+          params: { ...fireL1, textColor: textData.line1Color },
+          effectEnabled: true,
+        });
+      } else {
+        ctx.textAlign = 'right';
+        ctx.shadowColor = hexToRgba(textData.line1Color, 0.52);
+        ctx.shadowBlur = 10 * scaleH;
+        ctx.fillStyle = textData.line1Color;
+        ctx.fillText(line1, rightAnchor, baseLineY);
+      }
       ctx.filter = 'none';
       ctx.restore();
     }
@@ -1475,13 +1586,29 @@ export class KarbalaCosmicSlideEngine {
     if (line2 && state.line2Opacity > 0.01) {
       ctx.save();
       ctx.globalAlpha = state.line2Opacity;
-      ctx.textAlign = 'right';
       const blur2 = state.focusPulse.blurPx * scaleH;
       if (blur2 > 0.35) ctx.filter = `blur(${blur2.toFixed(1)}px)`;
-      ctx.shadowColor = hexToRgba(textData.accentColor, 0.8 * state.line2GlowNorm);
-      ctx.shadowBlur = 14 * scaleH * state.line2GlowNorm;
-      ctx.fillStyle = textData.accentColor;
-      ctx.fillText(line2, l2X, baseLineY + lineGap);
+      if (fireL2 && textData.cosmicFireEngine) {
+        textData.cosmicFireEngine.render(ctx, {
+          text: line2,
+          fontSizePx: fontSize,
+          fontFamily,
+          anchorX: l2X - l2Width * 0.5,
+          anchorY: baseLineY + lineGap,
+          canvasWidth: w,
+          canvasHeight: h,
+          timeSec,
+          durationSec: params.durationSec,
+          params: { ...fireL2, textColor: textData.accentColor },
+          effectEnabled: true,
+        });
+      } else {
+        ctx.textAlign = 'right';
+        ctx.shadowColor = hexToRgba(textData.accentColor, 0.85 * state.line2GlowNorm);
+        ctx.shadowBlur = 16 * scaleH * state.line2GlowNorm;
+        ctx.fillStyle = textData.accentColor;
+        ctx.fillText(line2, l2X, baseLineY + lineGap);
+      }
       ctx.filter = 'none';
       ctx.restore();
     }

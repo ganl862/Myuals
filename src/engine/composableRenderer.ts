@@ -1,5 +1,11 @@
 import { drawCosmicFire, drawGeometricDissolve } from './cosmicFire';
 import {
+  CosmicFireGlowEngine,
+  CosmicFireGlowParams,
+  extractFireGlowParamsFromEffect,
+  getResolvedCosmicTextFont,
+} from './cosmicFireGlow';
+import {
   COSMIC_SLIDE_REF_DURATION_SEC,
   CosmicSlideParams,
   CosmicSlideTextData,
@@ -7,6 +13,7 @@ import {
   drawStarfieldAndFlare,
   KarbalaCosmicSlideEngine,
 } from './cosmicSlide';
+import { mulberry32 } from './prng';
 import {
   clamp,
   computeTimelineState,
@@ -72,7 +79,9 @@ export function resolveActiveDurationMs(
       return Math.round(clamp(sec, 3.0, 12.0) * 1000);
     }
   }
-  return TOTAL_DURATION_MS;
+  const primary = clips[0] ? clipAssignments[clips[0].id] : undefined;
+  const durScale = primary?.values.durationScale ?? 1.0;
+  return Math.round(TOTAL_DURATION_MS * clamp(durScale, 0.6, 1.5));
 }
 
 function getSourceAspectRatio(
@@ -143,116 +152,171 @@ function drawProceduralClip(
   const t = progress01 * Math.PI * 2;
   const cx = w * 0.5;
   const cy = h * 0.48;
+  const minDim = Math.min(w, h);
 
   if (variant === 'amber-sculpt') {
-    const bg = ctx.createLinearGradient(0, 0, w, h);
-    bg.addColorStop(0, '#3D2618');
-    bg.addColorStop(0.45, '#734B2D');
-    bg.addColorStop(1, '#1A0F0A');
-    ctx.fillStyle = bg;
+    // Cinema twilight desert horizon + backlit volumetric sunbeams
+    const sky = ctx.createLinearGradient(0, 0, 0, h);
+    sky.addColorStop(0, '#0D080A');
+    sky.addColorStop(0.42, '#2B1612');
+    sky.addColorStop(0.68, '#7A4224');
+    sky.addColorStop(0.84, '#2A120D');
+    sky.addColorStop(1, '#080507');
+    ctx.fillStyle = sky;
     ctx.fillRect(0, 0, w, h);
 
-    const shiftX = Math.sin(t * 0.5) * w * 0.03;
-    const shiftY = Math.cos(t * 0.5) * h * 0.02;
-
-    const rim = ctx.createRadialGradient(
-      cx + shiftX,
-      cy - h * 0.08 + shiftY,
-      w * 0.04,
-      cx,
-      cy,
-      w * 0.65
-    );
-    rim.addColorStop(0, 'rgba(255, 224, 158, 0.92)');
-    rim.addColorStop(0.35, 'rgba(220, 148, 84, 0.62)');
-    rim.addColorStop(0.75, 'rgba(110, 48, 34, 0.35)');
-    rim.addColorStop(1, 'rgba(14, 8, 6, 0.0)');
-    ctx.fillStyle = rim;
+    const sunX = w * (0.58 + Math.sin(t * 0.35) * 0.025);
+    const sunY = h * 0.42;
+    const sunBloom = ctx.createRadialGradient(sunX, sunY, minDim * 0.02, sunX, sunY, w * 0.62);
+    sunBloom.addColorStop(0, 'rgba(255, 240, 200, 0.96)');
+    sunBloom.addColorStop(0.16, 'rgba(255, 198, 122, 0.72)');
+    sunBloom.addColorStop(0.44, 'rgba(196, 98, 52, 0.36)');
+    sunBloom.addColorStop(1, 'rgba(14, 7, 8, 0)');
+    ctx.fillStyle = sunBloom;
     ctx.fillRect(0, 0, w, h);
 
-    for (let i = 0; i < 4; i++) {
-      ctx.save();
+    // Volumetric god-rays
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    for (let r = 0; r < 5; r++) {
+      const ang = -0.55 + r * 0.24 + Math.sin(t * 0.4 + r) * 0.03;
+      const rayGrad = ctx.createLinearGradient(sunX, sunY, sunX + Math.cos(ang) * w, sunY + Math.sin(ang) * h);
+      rayGrad.addColorStop(0, 'rgba(255, 214, 152, 0.22)');
+      rayGrad.addColorStop(1, 'rgba(255, 160, 90, 0)');
+      ctx.fillStyle = rayGrad;
       ctx.beginPath();
-      const yBase = h * (0.26 + i * 0.15);
-      ctx.moveTo(0, yBase);
-      ctx.bezierCurveTo(
-        w * 0.34,
-        yBase - h * 0.13 + Math.sin(t + i * 1.1) * 24,
-        w * 0.68,
-        yBase + h * 0.13 + Math.cos(t + i * 1.1) * 24,
-        w,
-        yBase - h * 0.03
-      );
-      ctx.lineTo(w, h);
-      ctx.lineTo(0, h);
+      ctx.moveTo(sunX, sunY);
+      ctx.lineTo(sunX + Math.cos(ang - 0.09) * w * 1.2, sunY + Math.sin(ang - 0.09) * h * 1.2);
+      ctx.lineTo(sunX + Math.cos(ang + 0.09) * w * 1.2, sunY + Math.sin(ang + 0.09) * h * 1.2);
       ctx.closePath();
-      const foldGrad = ctx.createLinearGradient(0, yBase - 90, w, yBase + 170);
-      foldGrad.addColorStop(0, `rgba(${198 - i * 26}, ${126 - i * 20}, ${68 - i * 12}, 0.44)`);
-      foldGrad.addColorStop(1, 'rgba(18, 10, 7, 0.90)');
-      ctx.fillStyle = foldGrad;
       ctx.fill();
-      ctx.restore();
     }
+    ctx.restore();
 
-    const vig = ctx.createRadialGradient(cx, cy, w * 0.22, cx, cy, Math.max(w, h) * 0.78);
-    vig.addColorStop(0, 'rgba(0,0,0,0)');
-    vig.addColorStop(1, 'rgba(8,5,4,0.68)');
-    ctx.fillStyle = vig;
-    ctx.fillRect(0, 0, w, h);
+    // Silhouetted distant dunes & monumental archway profile
+    ctx.save();
+    ctx.fillStyle = 'rgba(12, 7, 8, 0.88)';
+    ctx.beginPath();
+    ctx.moveTo(0, h * 0.72);
+    ctx.bezierCurveTo(w * 0.24, h * 0.64, w * 0.46, h * 0.74, w * 0.66, h * 0.66);
+    ctx.bezierCurveTo(w * 0.82, h * 0.61, w * 0.92, h * 0.68, w, h * 0.63);
+    ctx.lineTo(w, h);
+    ctx.lineTo(0, h);
+    ctx.closePath();
+    ctx.fill();
+
+    // Central rim-lit figure / monument silhouette
+    ctx.fillStyle = '#090507';
+    ctx.beginPath();
+    ctx.ellipse(w * 0.44, h * 0.68, w * 0.14, h * 0.24, 0, Math.PI, Math.PI * 2);
+    ctx.lineTo(w * 0.58, h);
+    ctx.lineTo(w * 0.30, h);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+
+    // Floating dust embers (deterministic seeded)
+    const rng = mulberry32(1041);
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    for (let i = 0; i < 36; i++) {
+      const px = ((rng() + progress01 * (0.04 + rng() * 0.08)) % 1) * w;
+      const py = ((rng() - progress01 * (0.08 + rng() * 0.12) + 1) % 1) * h;
+      const r = (1 + rng() * 2.2) * (minDim / 720);
+      ctx.fillStyle = `rgba(255, 208, 138, ${0.18 + rng() * 0.42})`;
+      ctx.beginPath();
+      ctx.arc(px, py, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
   } else if (variant === 'crimson-silk') {
-    const bg = ctx.createLinearGradient(0, 0, w, h);
-    bg.addColorStop(0, '#140912');
-    bg.addColorStop(0.5, '#3A1127');
-    bg.addColorStop(1, '#09070C');
-    ctx.fillStyle = bg;
+    // Low-key crimson sunset horizon over dark clouds (matches moody epic silhouette reference)
+    const sky = ctx.createLinearGradient(0, 0, 0, h);
+    sky.addColorStop(0, '#070408');
+    sky.addColorStop(0.32, '#240B14');
+    sky.addColorStop(0.58, '#5C1822');
+    sky.addColorStop(0.76, '#280A10');
+    sky.addColorStop(1, '#050306');
+    ctx.fillStyle = sky;
     ctx.fillRect(0, 0, w, h);
 
-    const pulse = 0.5 + 0.5 * Math.sin(t);
-    const glow = ctx.createRadialGradient(
-      cx + Math.cos(t * 0.6) * w * 0.05,
-      cy - h * 0.06,
-      w * 0.04,
-      cx,
-      cy,
-      w * 0.68
-    );
-    glow.addColorStop(0, `rgba(255, 118, 178, ${0.42 + pulse * 0.16})`);
-    glow.addColorStop(0.45, 'rgba(156, 36, 94, 0.38)');
-    glow.addColorStop(1, 'rgba(10, 5, 12, 0)');
+    const horizonX = w * 0.48 + Math.cos(t * 0.4) * w * 0.03;
+    const horizonY = h * 0.52;
+    const glow = ctx.createRadialGradient(horizonX, horizonY, minDim * 0.03, horizonX, horizonY, w * 0.65);
+    glow.addColorStop(0, 'rgba(255, 168, 112, 0.72)');
+    glow.addColorStop(0.3, 'rgba(216, 48, 72, 0.48)');
+    glow.addColorStop(0.68, 'rgba(92, 14, 34, 0.25)');
+    glow.addColorStop(1, 'rgba(8, 3, 8, 0)');
     ctx.fillStyle = glow;
     ctx.fillRect(0, 0, w, h);
 
+    // Dramatic dark storm cloud bands
     for (let i = 0; i < 4; i++) {
-      ctx.save();
+      const yB = h * (0.14 + i * 0.13);
+      const band = ctx.createLinearGradient(0, yB, w, yB + h * 0.08);
+      band.addColorStop(0, 'rgba(12, 5, 10, 0.65)');
+      band.addColorStop(0.5, 'rgba(148, 56, 52, 0.22)');
+      band.addColorStop(1, 'rgba(10, 4, 8, 0.72)');
+      ctx.fillStyle = band;
       ctx.beginPath();
-      const yBase = h * (0.28 + i * 0.14);
-      ctx.moveTo(0, yBase);
-      ctx.bezierCurveTo(
-        w * 0.32,
-        yBase - h * 0.14 + Math.sin(t + i) * 26,
-        w * 0.68,
-        yBase + h * 0.14 + Math.cos(t + i) * 26,
-        w,
-        yBase - h * 0.04
+      ctx.ellipse(
+        w * (0.3 + i * 0.16) + Math.sin(t + i) * w * 0.02,
+        yB,
+        w * 0.48,
+        h * 0.065,
+        0,
+        0,
+        Math.PI * 2
       );
-      ctx.lineTo(w, h);
-      ctx.lineTo(0, h);
-      ctx.closePath();
-      const silk = ctx.createLinearGradient(0, yBase - 80, w, yBase + 160);
-      silk.addColorStop(0, `rgba(${160 - i * 24}, ${36 + i * 6}, ${88 - i * 8}, 0.45)`);
-      silk.addColorStop(1, 'rgba(12, 6, 14, 0.88)');
-      ctx.fillStyle = silk;
       ctx.fill();
-      ctx.restore();
     }
+
+    // Horizon ridge & dark silhouette
+    ctx.fillStyle = '#090407';
+    ctx.beginPath();
+    ctx.moveTo(0, h * 0.69);
+    ctx.quadraticCurveTo(w * 0.45, h * 0.62, w, h * 0.71);
+    ctx.lineTo(w, h);
+    ctx.lineTo(0, h);
+    ctx.closePath();
+    ctx.fill();
+
+    // Subtle rising embers
+    const rng = mulberry32(3097);
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    for (let i = 0; i < 32; i++) {
+      const px = rng() * w;
+      const py = ((rng() - progress01 * (0.12 + rng() * 0.14) + 1) % 1) * h;
+      const r = (1.1 + rng() * 2.0) * (minDim / 720);
+      ctx.fillStyle = `rgba(255, 108, 128, ${0.2 + rng() * 0.45})`;
+      ctx.beginPath();
+      ctx.arc(px, py, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
   } else {
     const bg = ctx.createLinearGradient(0, 0, w, h);
-    bg.addColorStop(0, '#0C1220');
-    bg.addColorStop(0.5, '#1E283D');
-    bg.addColorStop(1, '#080A10');
+    bg.addColorStop(0, '#070B16');
+    bg.addColorStop(0.52, '#1A243C');
+    bg.addColorStop(1, '#06080E');
     ctx.fillStyle = bg;
     ctx.fillRect(0, 0, w, h);
+
+    const beam = ctx.createRadialGradient(cx, cy - h * 0.1, minDim * 0.04, cx, cy, w * 0.68);
+    beam.addColorStop(0, 'rgba(246, 200, 118, 0.36)');
+    beam.addColorStop(0.45, 'rgba(56, 130, 212, 0.20)');
+    beam.addColorStop(1, 'rgba(6, 8, 14, 0)');
+    ctx.fillStyle = beam;
+    ctx.fillRect(0, 0, w, h);
   }
+
+  // Shared crushed cinema corner vignette
+  const vig = ctx.createRadialGradient(cx, cy, minDim * 0.26, cx, cy, Math.max(w, h) * 0.78);
+  vig.addColorStop(0, 'rgba(0,0,0,0)');
+  vig.addColorStop(1, 'rgba(4,3,6,0.62)');
+  ctx.fillStyle = vig;
+  ctx.fillRect(0, 0, w, h);
 }
 
 function drawCoverMedia(
@@ -347,15 +411,38 @@ export function buildMotionParamsFromAssignment(
 
   return {
     ...DEFAULT_MOTION_PARAMS,
-    beatBloomPeakBrightness: bloomFx?.values.brightness ?? DEFAULT_MOTION_PARAMS.beatBloomPeakBrightness,
+    beatBloomPeakBrightness:
+      bloomFx?.values.brightness ?? c1.beatBrightness ?? DEFAULT_MOTION_PARAMS.beatBloomPeakBrightness,
     radialBlurMaxPx: c1.radialBlurPx ?? DEFAULT_MOTION_PARAMS.radialBlurMaxPx,
     cardTargetScale: c1.cardScale ?? DEFAULT_MOTION_PARAMS.cardTargetScale,
     cardTargetTiltDeg: c1.cardTiltDeg ?? DEFAULT_MOTION_PARAMS.cardTargetTiltDeg,
     whipBlurMaxPx: c1.whipBlurPx ?? DEFAULT_MOTION_PARAMS.whipBlurMaxPx,
     neonGlowIntensity: neonFx?.values.power ?? DEFAULT_MOTION_PARAMS.neonGlowIntensity,
     cosmicFirePower: fireFx ? (fireFx.values.intensity ?? 1.0) : 0,
-    spinZoomBlurMax: spinFx ? (spinFx.values.strength ?? 1.0) : (c2.tiltSwingDeg ? c2.tiltSwingDeg / 9.5 : 0.9),
+    spinZoomBlurMax: spinFx
+      ? (spinFx.values.strength ?? 1.0)
+      : (c2.tiltSwingDeg ?? c1.tiltSwingDeg)
+        ? (c2.tiltSwingDeg ?? c1.tiltSwingDeg) / 9.5
+        : 0.9,
+    card2StartScale: c2.startScale ?? DEFAULT_MOTION_PARAMS.card2StartScale,
+    card2EndScale: c2.endScale ?? DEFAULT_MOTION_PARAMS.card2EndScale,
+    tiltSwingDeg: c2.tiltSwingDeg ?? c1.tiltSwingDeg ?? DEFAULT_MOTION_PARAMS.tiltSwingDeg,
+    chromaticBoost: c1.chromaticSplit ?? DEFAULT_MOTION_PARAMS.chromaticBoost,
   };
+}
+
+function findCosmicFireGlowForSlot(
+  textEffects: AttachedEffectInstance[],
+  slot: 'overlayText' | 'word1' | 'word2' | 'accentSymbol' | 'neonTitle' | 'cosmicTitle' | 'cosmicLine1' | 'cosmicLine2'
+): CosmicFireGlowParams | null {
+  for (const fx of textEffects) {
+    if (!fx.enabled || fx.effectId !== 'cosmic_fire_glow') continue;
+    const tSlot = fx.targetTextSlot ?? 'overlayText';
+    if (tSlot === slot || tSlot === 'all') {
+      return extractFireGlowParamsFromEffect(fx.values, fx.toggles, fx.selects, fx.colorHex);
+    }
+  }
+  return null;
 }
 
 export class ComposableCanvasRenderer {
@@ -367,6 +454,7 @@ export class ComposableCanvasRenderer {
   private mediaScratchCtx: CanvasRenderingContext2D;
   private webglProcessor: WebGLPostProcessor | null = null;
   private cosmicEngine: KarbalaCosmicSlideEngine;
+  private cosmicFireEngine: CosmicFireGlowEngine;
 
   constructor(width = 720, height = 1280) {
     this.sceneCanvas = document.createElement('canvas');
@@ -392,6 +480,7 @@ export class ComposableCanvasRenderer {
 
     this.webglProcessor = new WebGLPostProcessor(width, height);
     this.cosmicEngine = new KarbalaCosmicSlideEngine();
+    this.cosmicFireEngine = new CosmicFireGlowEngine();
   }
 
   public isWebGLAvailable(): boolean {
@@ -527,24 +616,23 @@ export class ComposableCanvasRenderer {
       const hasGlowModRegistered = allClip1Fx.some((e) => e.effectId === 'picture-glow-shadow-feather');
       const hasStarModRegistered = allClip1Fx.some((e) => e.effectId === 'starfield-lens-flare');
 
-      // Per-clip Shake on Clip B (either Focus-Pulse Shake transition OR attachable modifier on Clip 2)
+      // Self-contained Focus-Pulse & Shake directly inside cosmic_slide_3d (plus optional Clip 2 override)
+      const vals = cosmicAssign.values;
+      const togs = cosmicAssign.toggles ?? {};
+      const sels = cosmicAssign.selects ?? {};
+
       const c2IsFocusPulse = c2Assign?.transitionId === 'focus_pulse_shake';
       const c2ShakeMod = allClip2Fx.find((e) => e.enabled && e.effectId === 'focus-pulse-shake');
-      const c2HasFocusAssigned = c2IsFocusPulse || Boolean(c2ShakeMod);
       const c2OffExplicitly =
         (c2Assign?.transitionId === 'none' || c2Assign?.transitionId === 'cinematic-shake-impact') &&
         !c2ShakeMod;
 
       const shakeEnabled = c2OffExplicitly
         ? false
-        : (c2Assign?.toggles?.shakeEnabled ?? DEFAULT_COSMIC_SLIDE_PARAMS.shakeEnabled);
+        : (togs.shakeEnabled ?? c2Assign?.toggles?.shakeEnabled ?? DEFAULT_COSMIC_SLIDE_PARAMS.shakeEnabled);
       const focusPulseEnabled = c2OffExplicitly
         ? false
-        : (c2Assign?.toggles?.focusPulseEnabled ?? DEFAULT_COSMIC_SLIDE_PARAMS.focusPulseEnabled);
-
-      const vals = cosmicAssign.values;
-      const togs = cosmicAssign.toggles ?? {};
-      const sels = cosmicAssign.selects ?? {};
+        : (togs.focusPulseEnabled ?? c2Assign?.toggles?.focusPulseEnabled ?? DEFAULT_COSMIC_SLIDE_PARAMS.focusPulseEnabled);
 
       const cosmicParams: CosmicSlideParams = {
         ...DEFAULT_COSMIC_SLIDE_PARAMS,
@@ -562,12 +650,16 @@ export class ComposableCanvasRenderer {
         letterScatterAmount: vals.letterScatterAmount ?? DEFAULT_COSMIC_SLIDE_PARAMS.letterScatterAmount,
         assemblyDurationSec: vals.assemblyDurationSec ?? DEFAULT_COSMIC_SLIDE_PARAMS.assemblyDurationSec,
         shakeEnabled,
-        shakeStrength: c2HasFocusAssigned
-          ? (c2ShakeMod?.values.shakeStrength ?? c2Assign?.values.shakeStrength ?? 1.0)
-          : DEFAULT_COSMIC_SLIDE_PARAMS.shakeStrength,
-        zoomPunchAmount: c2HasFocusAssigned
-          ? (c2ShakeMod?.values.zoomPunchAmount ?? c2Assign?.values.zoomPunchAmount ?? 1.28)
-          : DEFAULT_COSMIC_SLIDE_PARAMS.zoomPunchAmount,
+        shakeStrength:
+          vals.shakeStrength ??
+          (c2IsFocusPulse || c2ShakeMod
+            ? (c2ShakeMod?.values.shakeStrength ?? c2Assign?.values.shakeStrength ?? 1.0)
+            : DEFAULT_COSMIC_SLIDE_PARAMS.shakeStrength),
+        zoomPunchAmount:
+          vals.zoomPunchAmount ??
+          (c2IsFocusPulse || c2ShakeMod
+            ? (c2ShakeMod?.values.zoomPunchAmount ?? c2Assign?.values.zoomPunchAmount ?? 1.28)
+            : DEFAULT_COSMIC_SLIDE_PARAMS.zoomPunchAmount),
         focusPulseEnabled,
         glowIntensity:
           hasGlowModRegistered && !glowMod
@@ -588,6 +680,10 @@ export class ComposableCanvasRenderer {
         line2Align: (sels.line2Align as CosmicSlideParams['line2Align']) ?? 'left',
       };
 
+      const fireCosmicTitle = findCosmicFireGlowForSlot(textEffects, 'cosmicTitle');
+      const fireCosmicLine1 = findCosmicFireGlowForSlot(textEffects, 'cosmicLine1');
+      const fireCosmicLine2 = findCosmicFireGlowForSlot(textEffects, 'cosmicLine2');
+
       const cosmicText: CosmicSlideTextData = {
         titleText: textConfig.cosmicTitleText,
         line1Text: textConfig.cosmicLine1Text,
@@ -597,6 +693,13 @@ export class ComposableCanvasRenderer {
         accentColor: textConfig.cosmicAccentColor,
         line1Color: textConfig.cosmicLine1Color,
         customFontFamily: textConfig.customFontFamily,
+        fontScaleMultiplier: textConfig.fontScaleMultiplier,
+        cosmicFireEngine: this.cosmicFireEngine,
+        fireSlots: {
+          cosmicTitle: fireCosmicTitle ?? undefined,
+          cosmicLine1: fireCosmicLine1 ?? undefined,
+          cosmicLine2: fireCosmicLine2 ?? undefined,
+        },
       };
 
       const srcA = clip1 ? mediaSources.get(clip1.id) : undefined;
@@ -622,6 +725,10 @@ export class ComposableCanvasRenderer {
         aspectA,
         aspectB
       );
+
+      // Render standalone overlay text ("عاشوراء 2025❤️") with or without Cosmic Fire Glow across frames 0..end
+      this.renderStandaloneOverlayText(ctxScene, w, h, timeMs, totalMs, textConfig, textEffects);
+
       ctxScene.restore();
 
       // Apply any optional post-FX attached to textEffects (e.g. Rotational Zoom Blur / Chromatic Split)
@@ -651,6 +758,8 @@ export class ComposableCanvasRenderer {
             rotationalBlur: cRotBlur,
             rotationalZoom: cRotZoom,
             chromaticPx: cChromatic,
+            timeSec,
+            noiseStrength: 0.012,
           });
         } else {
           targetCtx.drawImage(this.sceneCanvas, 0, 0, w, h);
@@ -660,13 +769,20 @@ export class ComposableCanvasRenderer {
       return computeTimelineState((timeMs / Math.max(1, totalMs)) * TOTAL_DURATION_MS);
     }
 
+    const activeTotalMs = options.totalDurationMs ?? resolveActiveDurationMs(clips, clipAssignments);
+    const canonicalTimeMs = clamp(
+      (timeMs / Math.max(1, activeTotalMs)) * TOTAL_DURATION_MS,
+      0,
+      TOTAL_DURATION_MS
+    );
+
     const combinedEffects = [
       ...(c1Assign?.effects ?? []),
       ...(c2Assign?.effects ?? []),
       ...textEffects,
     ];
     const motionParams = buildMotionParamsFromAssignment(c1Assign, c2Assign, combinedEffects);
-    const state = computeTimelineState(timeMs, motionParams);
+    const state = computeTimelineState(canonicalTimeMs, motionParams);
 
     const targetCtx = targetCanvas.getContext('2d');
     if (!targetCtx) return state;
@@ -711,7 +827,7 @@ export class ComposableCanvasRenderer {
       const c1Id = c1Assign?.transitionId ?? 'master-3d-neon-whip';
       const c1Vals = c1Assign?.values ?? {};
       const c1Fx = c1Assign?.effects ?? [];
-      const clip1Prog = isSingleClip ? clamp(timeMs / 4166) : state.clip1Progress;
+      const clip1Prog = isSingleClip ? clamp(canonicalTimeMs / TOTAL_DURATION_MS) : state.clip1Progress;
 
       // Render behind-clip effects on Clip 1
       for (const fx of findEffectsByPlacement(c1Fx, 'behind-clip')) {
@@ -766,11 +882,13 @@ export class ComposableCanvasRenderer {
         borderGlow = state.card1BorderGlow;
         shadowOp = state.card1ShadowOpacity;
 
+        postBrightness = Math.max(postBrightness, state.beatBloomBrightness);
+        postFlare = Math.max(postFlare, state.beatBloomFlare);
         postRadialBlur = Math.max(postRadialBlur, state.radialBlurPx);
         postHorizBlur = Math.max(postHorizBlur, isSingleClip ? 0 : state.horizontalMotionBlurPx);
         postWhiteout = Math.max(postWhiteout, state.whiteoutOpacity, isSingleClip ? 0 : state.whipFlashOpacity);
       } else if (c1Id === 'fake-zoom-geo-slide') {
-        const fakeScale = lerp(0.84, 1.0, cubicBezier(0.16, 1, 0.3, 1, clamp(timeMs / 280)));
+        const fakeScale = lerp(0.84, 1.0, cubicBezier(0.19, 1, 0.22, 1, clamp(canonicalTimeMs / 280)));
         const pushMax = c1Vals.zoomPush ?? 1.18;
         const realScale = lerp(1.0, pushMax, clamp(clip1Prog * 1.4));
         if (fakeScale < 0.996) {
@@ -796,8 +914,8 @@ export class ComposableCanvasRenderer {
         const amp = c1Vals.shakeAmp ?? 18;
         const freq = c1Vals.shakeFreq ?? 16;
         const decay = Math.exp(-clip1Prog * 3.5);
-        shakeX = Math.sin((timeMs / 1000) * freq * Math.PI) * amp * decay;
-        shakeY = Math.cos((timeMs / 1000) * freq * 1.3 * Math.PI) * amp * 0.7 * decay;
+        shakeX = Math.sin((canonicalTimeMs / 1000) * freq * Math.PI) * amp * decay;
+        shakeY = Math.cos((canonicalTimeMs / 1000) * freq * 1.3 * Math.PI) * amp * 0.7 * decay;
         drawScale = 1.06;
         postWhiteout = Math.max(postWhiteout, (c1Vals.flashPeak ?? 0.65) * Math.exp(-clip1Prog * 9));
       }
@@ -806,8 +924,8 @@ export class ComposableCanvasRenderer {
       for (const fx of c1Fx) {
         if (!fx.enabled || fx.effectId !== 'handheld-shake') continue;
         const amt = fx.values.amount ?? 6;
-        shakeX += Math.sin(timeMs * 0.019) * amt;
-        shakeY += Math.cos(timeMs * 0.023) * amt * 0.8;
+        shakeX += Math.sin(canonicalTimeMs * 0.019) * amt;
+        shakeY += Math.cos(canonicalTimeMs * 0.023) * amt * 0.8;
       }
 
       this.clipBufferCtx.save();
@@ -830,9 +948,9 @@ export class ComposableCanvasRenderer {
       for (const fx of findEffectsByPlacement(c1Fx, 'above-clip')) {
         if (fx.effectId === 'beat-bloom') {
           const peak = fx.values.brightness ?? 1.8;
-          const bAttack = smoothstep(680, 816, timeMs);
-          const bDecay = 1 - smoothstep(816, 1180, timeMs);
-          const curve = timeMs < 816 ? bAttack : bDecay;
+          const bAttack = smoothstep(680, 816, canonicalTimeMs);
+          const bDecay = 1 - smoothstep(816, 1180, canonicalTimeMs);
+          const curve = canonicalTimeMs < 816 ? bAttack : bDecay;
           postBrightness = Math.max(postBrightness, 1 + curve * (peak - 1));
           postFlare = Math.max(postFlare, curve * 0.68);
         } else {
@@ -851,7 +969,7 @@ export class ComposableCanvasRenderer {
       // Intro text on Clip 1 when transition supports text
       const c1HasText = getTransitionDef(c1Id).hasTextLayer;
       if (c1HasText && state.introTextOpacity > 0.01) {
-        this.drawIntroPhrase(this.clipBufferCtx, w, h, state, textConfig);
+        this.drawIntroPhrase(this.clipBufferCtx, w, h, state, textConfig, textEffects);
       }
 
       this.clipBufferCtx.restore();
@@ -909,24 +1027,25 @@ export class ComposableCanvasRenderer {
         for (const fx of findEffectsByPlacement(textEffects, 'behind-text')) {
           this.renderAttachableEffect(ctx, fx, w, h, timeMs, clip1Prog);
         }
-        if (timeMs >= 1800) {
+        if (canonicalTimeMs >= 1800) {
           this.drawNeonTitle(
             ctx,
             w,
             h,
             {
               ...state,
-              neonTitleOpacity: smoothstep(1800, 2100, timeMs),
+              neonTitleOpacity: smoothstep(1800, 2100, canonicalTimeMs),
               neonTitleTranslateXPercent: 0,
               neonTitleScale: 1,
-              neonTitleRotateDeg: lerp(-12, 0, smoothstep(1800, 2300, timeMs)),
+              neonTitleRotateDeg: lerp(-12, 0, smoothstep(1800, 2300, canonicalTimeMs)),
               neonGlowAlpha: 1.0,
             },
-            textConfig
+            textConfig,
+            textEffects
           );
         }
         for (const fx of findEffectsByPlacement(textEffects, 'above-text')) {
-          const mods = this.extractPostModifiers(fx, timeMs, clip1Prog);
+          const mods = this.extractPostModifiers(fx, canonicalTimeMs, clip1Prog);
           postRotBlur = Math.max(postRotBlur, mods.rotBlur);
           postRotZoom = Math.max(postRotZoom, mods.rotZoom);
           postChromatic = Math.max(postChromatic, mods.chromatic);
@@ -936,7 +1055,7 @@ export class ComposableCanvasRenderer {
 
     // --- Evaluate Clip 2 (+ optional Clip 3) during Phase 5 (2975ms -> 4166ms) ---
     if (!isSingleClip && state.showClip2 && clip2) {
-      const c2Id = c2Assign?.transitionId ?? 'smooth-zoom-out-tilt';
+      const c2Id = c2Assign?.transitionId ?? 'master-3d-neon-whip';
       const c2Vals = c2Assign?.values ?? {};
       const c2Fx = c2Assign?.effects ?? [];
 
@@ -950,8 +1069,8 @@ export class ComposableCanvasRenderer {
         state.clip2Progress
       );
 
-      if (clip3 && timeMs >= 3620) {
-        const blend = Math.min(1, (timeMs - 3620) / 220);
+      if (clip3 && canonicalTimeMs >= 3620) {
+        const blend = Math.min(1, (canonicalTimeMs - 3620) / 220);
         this.clipBufferCtx.save();
         this.clipBufferCtx.globalAlpha = blend;
         drawCoverMedia(
@@ -960,12 +1079,12 @@ export class ComposableCanvasRenderer {
           'obsidian-gold',
           w,
           h,
-          clamp((timeMs - 3620) / (4166 - 3620))
+          clamp((canonicalTimeMs - 3620) / (TOTAL_DURATION_MS - 3620))
         );
         this.clipBufferCtx.restore();
       }
 
-      // Compute independent transition behavior for Clip 2
+      // Compute seamless transition behavior for Clip 2
       let camTiltDeg = 0;
       let c2Scale = 1.0;
       let c2TxPercent = 0;
@@ -978,7 +1097,7 @@ export class ComposableCanvasRenderer {
       if (c2Id === 'smooth-zoom-out-tilt' || c2Id === 'master-3d-neon-whip') {
         const startS = c2Vals.startScale ?? 0.72;
         const endS = c2Vals.endScale ?? 0.54;
-        const zoomOutT = clamp((timeMs - 2983) / (4166 - 2983));
+        const zoomOutT = clamp((canonicalTimeMs - 2983) / (TOTAL_DURATION_MS - 2983));
         c2Scale =
           c2Id === 'smooth-zoom-out-tilt'
             ? lerp(startS, endS, cubicBezier(0.22, 1, 0.36, 1, zoomOutT))
@@ -988,25 +1107,23 @@ export class ComposableCanvasRenderer {
         c2CornerNorm = 1;
         c2BorderGlow = state.card2BorderGlow;
 
-        const swingMax = c2Vals.tiltSwingDeg ?? 9.5;
-        if (timeMs >= 3540) {
-          const fT = clamp((timeMs - 3540) / (4166 - 3540));
-          const env = Math.sin(fT * Math.PI);
-          const sec = Math.sin(fT * Math.PI * 2.2);
-          camTiltDeg = -swingMax * env + 3.2 * sec * (1 - fT * 0.35);
-        }
+        camTiltDeg = state.scene2CameraTiltDeg;
         postHorizBlur = Math.max(postHorizBlur, state.horizontalMotionBlurPx);
         postWhiteout = Math.max(postWhiteout, state.whipFlashOpacity);
+        if (c2Id === 'master-3d-neon-whip') {
+          postRotBlur = Math.max(postRotBlur, state.rotationalBlurAngleRad);
+          postRotZoom = Math.max(postRotZoom, state.rotationalZoomAmount);
+        }
       } else if (c2Id === 'fake-zoom-geo-slide') {
-        const fakeScale = lerp(0.84, 1.0, cubicBezier(0.16, 1, 0.3, 1, clamp(state.clip2Progress * 3.5)));
+        const fakeScale = lerp(0.84, 1.0, cubicBezier(0.19, 1, 0.22, 1, clamp(state.clip2Progress * 3.5)));
         c2Scale = fakeScale * lerp(1.0, c2Vals.zoomPush ?? 1.18, state.clip2Progress);
         c2TxPercent = Math.sin(state.clip2Progress * Math.PI) * -(c2Vals.slideAmount ?? 10);
       } else if (c2Id === 'cinematic-shake-impact') {
         const amp = c2Vals.shakeAmp ?? 18;
         const freq = c2Vals.shakeFreq ?? 16;
         const decay = Math.exp(-state.clip2Progress * 3.5);
-        c2ShakeX = Math.sin((timeMs / 1000) * freq * Math.PI) * amp * decay;
-        c2ShakeY = Math.cos((timeMs / 1000) * freq * 1.3 * Math.PI) * amp * 0.7 * decay;
+        c2ShakeX = Math.sin((canonicalTimeMs / 1000) * freq * Math.PI) * amp * decay;
+        c2ShakeY = Math.cos((canonicalTimeMs / 1000) * freq * 1.3 * Math.PI) * amp * 0.7 * decay;
         c2Scale = 1.06;
         postWhiteout = Math.max(
           postWhiteout,
@@ -1089,7 +1206,7 @@ export class ComposableCanvasRenderer {
       // Layer 3: Behind-Text Attachable Effects (e.g., Cosmic Fire behind Text!)
       for (const fx of [...findEffectsByPlacement(textEffects, 'behind-clip'), ...findEffectsByPlacement(textEffects, 'behind-text')]) {
         if (fx.effectId === 'cosmic-fire') {
-          const fireFade = smoothstep(3060, 3320, timeMs) * (fx.values.intensity ?? 1.0);
+          const fireFade = smoothstep(3060, 3320, canonicalTimeMs) * (fx.values.intensity ?? 1.0);
           const speed = fx.values.speed ?? 1.0;
           drawCosmicFire(ctx, w * 0.5, h * 0.5, w * 0.92, h * 0.68, fireFade, (timeMs / 1000) * speed);
         } else {
@@ -1097,14 +1214,14 @@ export class ComposableCanvasRenderer {
         }
       }
 
-      // Layer 4: Scene 2 Text Layer (if Clip 2 transition has text layer)
+      // Layer 4: Scene 2 Text Layer (if transition has text layer)
       const c2HasText = getTransitionDef(c2Id).hasTextLayer;
       if (c2HasText) {
         if (state.scene2AccentOpacity > 0.01 && textConfig.accentSymbol.trim()) {
           this.drawScene2RotatedEmblem(ctx, w, h, state, textConfig);
         }
         if (state.neonTitleOpacity > 0.01 && textConfig.neonTitle.trim()) {
-          this.drawNeonTitle(ctx, w, h, state, textConfig);
+          this.drawNeonTitle(ctx, w, h, state, textConfig, textEffects);
         }
       }
 
@@ -1115,12 +1232,12 @@ export class ComposableCanvasRenderer {
         ...findEffectsByPlacement(textEffects, 'above-clip'),
         ...findEffectsByPlacement(textEffects, 'above-text'),
       ]) {
-        const mods = this.extractPostModifiers(fx, timeMs, state.clip2Progress);
+        const mods = this.extractPostModifiers(fx, canonicalTimeMs, state.clip2Progress);
         postRotBlur = Math.max(postRotBlur, mods.rotBlur);
         postRotZoom = Math.max(postRotZoom, mods.rotZoom);
         postChromatic = Math.max(postChromatic, mods.chromatic);
         if (fx.effectId === 'cosmic-fire' && fx.placement === 'above-text') {
-          const fireFade = smoothstep(3060, 3320, timeMs) * (fx.values.intensity ?? 1.0) * 0.65;
+          const fireFade = smoothstep(3060, 3320, canonicalTimeMs) * (fx.values.intensity ?? 1.0) * 0.65;
           drawCosmicFire(ctx, w * 0.5, h * 0.5, w * 0.92, h * 0.68, fireFade, (timeMs / 1000) * (fx.values.speed ?? 1.0));
         }
       }
@@ -1135,7 +1252,7 @@ export class ComposableCanvasRenderer {
         ...(isSingleClip ? textEffects : []),
       ]) {
         if (!fx.enabled) continue;
-        const mods = this.extractPostModifiers(fx, timeMs, state.clip1Progress);
+        const mods = this.extractPostModifiers(fx, canonicalTimeMs, state.clip1Progress);
         postRotBlur = Math.max(postRotBlur, mods.rotBlur);
         postRotZoom = Math.max(postRotZoom, mods.rotZoom);
         postChromatic = Math.max(postChromatic, mods.chromatic);
@@ -1143,6 +1260,17 @@ export class ComposableCanvasRenderer {
     }
 
     postChromatic = Math.max(postChromatic, state.chromaticSplitPx * 0.55);
+
+    // Render standalone overlay text ("عاشوراء 2025❤️") across full duration when enabled or attached
+    this.renderStandaloneOverlayText(
+      ctx,
+      w,
+      h,
+      timeMs,
+      activeTotalMs,
+      textConfig,
+      textEffects
+    );
 
     ctx.restore();
 
@@ -1158,6 +1286,8 @@ export class ComposableCanvasRenderer {
         rotationalBlur: postRotBlur,
         rotationalZoom: postRotZoom,
         chromaticPx: postChromatic,
+        timeSec: timeMs / 1000,
+        noiseStrength: 0.014,
       });
       if (ok) return state;
     }
@@ -1233,12 +1363,71 @@ export class ComposableCanvasRenderer {
     return { rotBlur: 0, rotZoom: 0, chromatic: 0 };
   }
 
+  private renderStandaloneOverlayText(
+    ctx: CanvasRenderingContext2D,
+    w: number,
+    h: number,
+    timeMs: number,
+    totalDurationMs: number,
+    textConfig: TextLayerConfig,
+    textEffects: AttachedEffectInstance[]
+  ) {
+    const fireFx = findCosmicFireGlowForSlot(textEffects, 'overlayText');
+    if (!textConfig.overlayTextEnabled && !fireFx) return;
+
+    const text = (textConfig.overlayText || 'عاشوراء 2025❤️').trim();
+    if (!text) return;
+
+    // Height h ≈ 0.045H * fontScaleMultiplier (with clean mobile readability floor on landscape/portrait)
+    const baseRatio = h > w ? 0.046 : 0.062;
+    const hPx = Math.max(20, Math.round(h * baseRatio * (textConfig.fontScaleMultiplier || 1.0)));
+    const fontFamily = getResolvedCosmicTextFont(textConfig.customFontFamily, text);
+
+    const anchorX = w * 0.49;
+    const anchorY = h * 0.48;
+    const params = fireFx ?? {
+      spread: 1.0,
+      upwardBias: 1.0,
+      turbulence: 1.0,
+      riseSpeed: 1.0,
+      edgeSoftness: 1.0,
+      rimThickness: 1.0,
+      opacity: 1.0,
+      breathing: 0.08,
+      introSec: 0,
+      outroSec: 0,
+      seed: 1337,
+      preset: 'crimson' as const,
+      customHex: '#D81B45',
+      textColor: textConfig.overlayTextColor || '#FFFFFF',
+      smokeEnabled: true,
+      holesEnabled: true,
+      look30fps: false,
+      blendMode: 'normal' as const,
+    };
+
+    this.cosmicFireEngine.render(ctx, {
+      text,
+      fontSizePx: hPx,
+      fontFamily,
+      anchorX,
+      anchorY,
+      canvasWidth: w,
+      canvasHeight: h,
+      timeSec: timeMs / 1000,
+      durationSec: totalDurationMs / 1000,
+      params: { ...params, textColor: textConfig.overlayTextColor || '#FFFFFF' },
+      effectEnabled: Boolean(fireFx),
+    });
+  }
+
   private drawIntroPhrase(
     ctx: CanvasRenderingContext2D,
     w: number,
     h: number,
     state: TimelineState,
-    textConfig: TextLayerConfig
+    textConfig: TextLayerConfig,
+    textEffects: AttachedEffectInstance[] = []
   ) {
     const word1 = textConfig.introWord1.trim();
     const word2 = textConfig.introWord2.trim();
@@ -1296,19 +1485,38 @@ export class ComposableCanvasRenderer {
       w2X = targetW2X + (state.word2SlideXPercent / 100) * w;
     }
 
+    const fireW1 = findCosmicFireGlowForSlot(textEffects, 'word1');
+    const fireW2 = findCosmicFireGlowForSlot(textEffects, 'word2');
+
     if (word1 && state.word1Opacity > 0.01) {
       ctx.save();
       ctx.globalAlpha = state.introTextOpacity * state.word1Opacity;
       ctx.translate(w1X, yPos);
       ctx.rotate((state.word1RotateDeg * Math.PI) / 180);
       ctx.scale(state.word1Scale, state.word1Scale);
-      ctx.shadowColor = 'rgba(0, 0, 0, 0.9)';
-      ctx.shadowBlur = 16;
-      ctx.lineWidth = Math.max(2.5, fontSize * 0.065);
-      ctx.strokeStyle = 'rgba(18, 10, 14, 0.86)';
-      ctx.strokeText(word1, 0, 0);
-      ctx.fillStyle = textConfig.word1Color || '#FFFFFF';
-      ctx.fillText(word1, 0, 0);
+      if (fireW1) {
+        this.cosmicFireEngine.render(ctx, {
+          text: word1,
+          fontSizePx: fontSize,
+          fontFamily,
+          anchorX: 0,
+          anchorY: 0,
+          canvasWidth: w,
+          canvasHeight: h,
+          timeSec: state.timeMs / 1000,
+          durationSec: 4.166,
+          params: { ...fireW1, textColor: textConfig.word1Color || '#FFFFFF' },
+          effectEnabled: true,
+        });
+      } else {
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.9)';
+        ctx.shadowBlur = 16;
+        ctx.lineWidth = Math.max(2.5, fontSize * 0.065);
+        ctx.strokeStyle = 'rgba(18, 10, 14, 0.86)';
+        ctx.strokeText(word1, 0, 0);
+        ctx.fillStyle = textConfig.word1Color || '#FFFFFF';
+        ctx.fillText(word1, 0, 0);
+      }
       ctx.restore();
     }
 
@@ -1318,13 +1526,29 @@ export class ComposableCanvasRenderer {
       ctx.globalAlpha = state.introTextOpacity * state.word2Opacity;
       ctx.translate(w2X, yPos);
       ctx.scale(state.word2Scale, state.word2Scale);
-      ctx.shadowColor = hexToRgba(w2Col, 0.92);
-      ctx.shadowBlur = 22;
-      ctx.lineWidth = Math.max(2.5, fontSize * 0.065);
-      ctx.strokeStyle = 'rgba(22, 6, 14, 0.92)';
-      ctx.strokeText(word2, 0, 0);
-      ctx.fillStyle = w2Col;
-      ctx.fillText(word2, 0, 0);
+      if (fireW2) {
+        this.cosmicFireEngine.render(ctx, {
+          text: word2,
+          fontSizePx: fontSize,
+          fontFamily,
+          anchorX: 0,
+          anchorY: 0,
+          canvasWidth: w,
+          canvasHeight: h,
+          timeSec: state.timeMs / 1000,
+          durationSec: 4.166,
+          params: { ...fireW2, textColor: w2Col },
+          effectEnabled: true,
+        });
+      } else {
+        ctx.shadowColor = hexToRgba(w2Col, 0.92);
+        ctx.shadowBlur = 22;
+        ctx.lineWidth = Math.max(2.5, fontSize * 0.065);
+        ctx.strokeStyle = 'rgba(22, 6, 14, 0.92)';
+        ctx.strokeText(word2, 0, 0);
+        ctx.fillStyle = w2Col;
+        ctx.fillText(word2, 0, 0);
+      }
       ctx.restore();
     }
 
@@ -1435,7 +1659,8 @@ export class ComposableCanvasRenderer {
     w: number,
     h: number,
     state: TimelineState,
-    textConfig: TextLayerConfig
+    textConfig: TextLayerConfig,
+    textEffects: AttachedEffectInstance[] = []
   ) {
     const title = textConfig.neonTitle.trim();
     if (!title) return;
@@ -1467,6 +1692,26 @@ export class ComposableCanvasRenderer {
     ctx.translate(w * 0.5 + tx, h * 0.5);
     ctx.rotate(titleRotRad);
     ctx.scale(state.neonTitleScale, state.neonTitleScale);
+
+    const fireNeon = findCosmicFireGlowForSlot(textEffects, 'neonTitle');
+    if (fireNeon) {
+      this.cosmicFireEngine.render(ctx, {
+        text: title,
+        fontSizePx: fontSize,
+        fontFamily,
+        anchorX: 0,
+        anchorY: 0,
+        canvasWidth: w,
+        canvasHeight: h,
+        timeSec: state.timeMs / 1000,
+        durationSec: 4.166,
+        params: { ...fireNeon, textColor: coreColor },
+        effectEnabled: true,
+      });
+      ctx.restore();
+      return;
+    }
+
     ctx.font = `700 ${fontSize}px ${fontFamily}`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';

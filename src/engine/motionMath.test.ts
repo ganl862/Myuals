@@ -3,9 +3,12 @@ import assert from 'node:assert/strict';
 import {
   TOTAL_DURATION_MS,
   TOTAL_FRAMES,
+  EDITORIAL_CURVES,
   computeTimelineState,
   cubicBezier,
+  cubicBezierVelocity,
   dampedSpring,
+  impulseSpring,
   DEFAULT_MOTION_PARAMS,
 } from './motionMath';
 
@@ -14,6 +17,40 @@ test('cubicBezier endpoints and monotonicity for (0.16, 1, 0.3, 1)', () => {
   assert.equal(cubicBezier(0.16, 1, 0.3, 1, 1), 1);
   const mid = cubicBezier(0.16, 1, 0.3, 1, 0.5);
   assert.ok(mid > 0.8 && mid < 1.0, `Expected fast ease-out near 0.9+, got ${mid}`);
+});
+
+test('editorial cubicBezierVelocity peaks smoothly and impulseSpring starts at 0 with C0 continuity', () => {
+  const [p1x, p1y, p2x, p2y] = EDITORIAL_CURVES.heavyWhipOut;
+  const vStart = cubicBezierVelocity(p1x, p1y, p2x, p2y, 0.05);
+  const vEnd = cubicBezierVelocity(p1x, p1y, p2x, p2y, 0.92);
+  assert.ok(vEnd > vStart, `Expected whip-out velocity to accelerate: start=${vStart}, end=${vEnd}`);
+
+  assert.equal(impulseSpring(0, 240, 20), 0);
+  const peak = impulseSpring(0.08, 240, 20, 1, 40);
+  assert.ok(Math.abs(peak) > 0.5);
+  assert.ok(Math.abs(impulseSpring(0.7, 240, 20, 1, 40)) < 0.05);
+
+  const beforeLock = computeTimelineState(3049);
+  const afterLock = computeTimelineState(3051);
+  assert.ok(
+    Math.abs(afterLock.card2TranslateXPercent - beforeLock.card2TranslateXPercent) < 1.5,
+    `Expected smooth C0 continuity at 3050ms, delta=${Math.abs(afterLock.card2TranslateXPercent - beforeLock.card2TranslateXPercent)}`
+  );
+});
+
+test('custom chromaticBoost and tiltSwingDeg modulate Phase 5 output cleanly', () => {
+  const subtle = computeTimelineState(3850, {
+    ...DEFAULT_MOTION_PARAMS,
+    tiltSwingDeg: 4,
+    chromaticBoost: 0.5,
+  });
+  const hard = computeTimelineState(3850, {
+    ...DEFAULT_MOTION_PARAMS,
+    tiltSwingDeg: 15,
+    chromaticBoost: 1.8,
+  });
+  assert.ok(Math.abs(hard.scene2CameraTiltDeg) > Math.abs(subtle.scene2CameraTiltDeg));
+  assert.ok(hard.chromaticSplitPx > subtle.chromaticSplitPx);
 });
 
 test('dampedSpring starts at 1 and settles close to 0 with overshoot', () => {

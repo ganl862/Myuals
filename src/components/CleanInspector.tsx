@@ -1,17 +1,5 @@
 import React, { useMemo, useRef, useState } from 'react';
-import {
-  ChevronDown,
-  ChevronUp,
-  Layers,
-  Palette,
-  Plus,
-  RotateCcw,
-  Sliders,
-  Trash2,
-  Type,
-  Upload,
-  X,
-} from 'lucide-react';
+import { X } from 'lucide-react';
 import {
   getEffectiveClipDuration,
   MAX_IMAGE_DURATION_SEC,
@@ -21,8 +9,8 @@ import {
 import {
   AttachedEffectInstance,
   canAddEffectWithoutWarning,
-  ClipTransitionAssignment,
   cycleEffectPlacement,
+  EditPacingPreset,
   EFFECT_MODIFIER_REGISTRY,
   EffectLayerPlacement,
   EffectModifierId,
@@ -30,6 +18,7 @@ import {
   getTransitionDef,
   PLACEMENT_LABELS,
   reorderEffectsList,
+  SequenceTransitionState,
   SOFT_CAP_EFFECTS,
   TextTargetSlot,
   TRANSITION_REGISTRY,
@@ -37,6 +26,29 @@ import {
 } from '../engine/registry';
 import { TEXT_COLOR_SWATCHES, TextLayerConfig } from '../engine/typography';
 import { ActiveContextKey } from './ContextSwitcher';
+import {
+  BalancedWaveIcon,
+  ColorPaletteVectorIcon,
+  DeleteTrashVectorIcon,
+  EditSlidersVectorIcon,
+  EffectModifierIcon,
+  EffectsTabIcon,
+  FastEditBoltIcon,
+  FontUploadVectorIcon,
+  HardEditFlameIcon,
+  MoveDownVectorIcon,
+  MoveUpVectorIcon,
+  ParamControlIcon,
+  PlusAddVectorIcon,
+  ReplaceMediaIcon,
+  ResetParamIcon,
+  SafetyLockIcon,
+  ScissorsTrimIcon,
+  SequenceFlowIcon,
+  TextLayerIcon,
+  TransitionModuleIcon,
+  TransitionTabIcon,
+} from './StudioIcons';
 
 export type InspectorTab = 'transition' | 'effects' | 'text';
 
@@ -50,18 +62,21 @@ interface CleanInspectorProps {
   clips: MediaClipItem[];
   activeClip: MediaClipItem | null;
   activeClipIndex: number;
-  activeAssignment: ClipTransitionAssignment | null;
+  sequenceTransition: SequenceTransitionState;
   activeEffects: AttachedEffectInstance[];
   textConfig: TextLayerConfig;
-  onSelectClipTransition: (clipId: string, transitionId: TransitionModuleId) => void;
-  onUpdateClipTransitionParam: (clipId: string, key: string, value: number) => void;
-  onUpdateClipTransitionToggle: (clipId: string, key: string, value: boolean) => void;
-  onUpdateClipTransitionSelect: (clipId: string, key: string, value: string) => void;
+  onSelectSequenceTransition: (transitionId: TransitionModuleId) => void;
+  onChangePacingPreset: (preset: EditPacingPreset) => void;
+  onResetSequenceTransition: () => void;
+  onUpdateSequenceParam: (key: string, value: number) => void;
+  onUpdateSequenceToggle: (key: string, value: boolean) => void;
+  onUpdateSequenceSelect: (key: string, value: string) => void;
   onUpdateImageDuration: (clipId: string, durationSec: number) => void;
   onUpdateTrim: (clipId: string, trimStart: number, trimEnd: number) => void;
   onReplaceClipFile: (clipIndex: number, files: FileList) => void;
   onRemoveClip: (clipId: string) => void;
   onUpdateActiveEffects: (next: AttachedEffectInstance[]) => void;
+  onResetEffect?: (instanceId: string) => void;
   onAddEffect: (effectId: EffectModifierId, targetSlot?: TextTargetSlot) => void;
   onChangeTextConfig: (next: TextLayerConfig) => void;
   onUploadFont: (file: File) => void;
@@ -140,7 +155,7 @@ const CompactTextCard: React.FC<TextItemEditorProps> = ({
           aria-label={`اختيار لون مخصص: ${titleLabel} ${quoted}`}
           className="min-h-[36px] min-w-[36px] rounded-md bg-[#20242C] border border-white/20 flex items-center justify-center cursor-pointer overflow-hidden px-1"
         >
-          <Palette className="w-4 h-4 text-[#D1D5DB]" />
+          <ColorPaletteVectorIcon className="w-4 h-4" />
           <input
             type="color"
             value={activeHex}
@@ -247,29 +262,35 @@ export const CleanInspector: React.FC<CleanInspectorProps> = ({
   clips,
   activeClip,
   activeClipIndex,
-  activeAssignment,
+  sequenceTransition,
   activeEffects,
   textConfig,
-  onSelectClipTransition,
-  onUpdateClipTransitionParam,
-  onUpdateClipTransitionToggle,
-  onUpdateClipTransitionSelect,
+  onSelectSequenceTransition,
+  onChangePacingPreset,
+  onResetSequenceTransition,
+  onUpdateSequenceParam,
+  onUpdateSequenceToggle,
+  onUpdateSequenceSelect,
   onUpdateImageDuration,
   onUpdateTrim,
   onReplaceClipFile,
   onRemoveClip,
   onUpdateActiveEffects,
+  onResetEffect,
   onAddEffect,
   onChangeTextConfig,
   onUploadFont,
   onClearFont,
 }) => {
   const [expandedEffectId, setExpandedEffectId] = useState<string | null>(null);
+  const [showAdvancedFxParams, setShowAdvancedFxParams] = useState<Record<string, boolean>>({});
   const [showAddPicker, setShowAddPicker] = useState(false);
-  const [pendingTargetSlot, setPendingTargetSlot] = useState<TextTargetSlot>('all');
+  const [pendingTargetSlot, setPendingTargetSlot] = useState<TextTargetSlot>('overlayText');
   const [showSoftCapModal, setShowSoftCapModal] = useState(false);
   const [softCapApprovedOnce, setSoftCapApprovedOnce] = useState(false);
   const [openColorPickerKey, setOpenColorPickerKey] = useState<string | null>(null);
+  const [trimDrawerOpen, setTrimDrawerOpen] = useState<boolean>(false);
+  const [slidersLocked, setSlidersLocked] = useState<boolean>(false);
 
   const replaceInputRef = useRef<HTMLInputElement | null>(null);
   const fontInputRef = useRef<HTMLInputElement | null>(null);
@@ -283,9 +304,12 @@ export const CleanInspector: React.FC<CleanInspectorProps> = ({
         ? 'transition'
         : activeTab;
 
-  // Build explicit readable text-target options with live quoted text so user ALWAYS knows which text an effect applies to
   const textTargetOptions = useMemo<Array<{ value: TextTargetSlot; label: string }>>(() => {
     const opts: Array<{ value: TextTargetSlot; label: string }> = [
+      {
+        value: 'overlayText',
+        label: `النص المستقل «${textConfig.overlayText || 'عاشوراء 2025❤️'}»`,
+      },
       { value: 'all', label: 'كل النصوص في المشهد' },
     ];
     if (isCosmicActive) {
@@ -335,6 +359,7 @@ export const CleanInspector: React.FC<CleanInspectorProps> = ({
     const found = textTargetOptions.find((o) => o.value === slot);
     if (found) return found.label;
     if (slot === 'neonTitle') return `العنوان الرئيسي «${textConfig.neonTitle}»`;
+    if (slot === 'overlayText') return `النص المستقل «${textConfig.overlayText}»`;
     return 'طبقة النص';
   };
 
@@ -374,9 +399,7 @@ export const CleanInspector: React.FC<CleanInspectorProps> = ({
     );
   };
 
-  const selectedTransDef = activeAssignment
-    ? getTransitionDef(activeAssignment.transitionId)
-    : null;
+  const selectedTransDef = getTransitionDef(sequenceTransition.transitionId);
 
   return (
     <section
@@ -384,11 +407,11 @@ export const CleanInspector: React.FC<CleanInspectorProps> = ({
       aria-label="لوحة المفتش"
       className="flex-1 min-h-0 flex flex-col bg-[#181B21] border border-white/10 rounded-lg overflow-hidden"
     >
-      {/* Inspector Top Tab Bar */}
+      {/* Inspector Top Tab Bar + Safety Slider Lock */}
       <div
         role="tablist"
         aria-label="أقسام التعديل"
-        className="p-2 bg-[#111317] border-b border-white/10 flex items-center gap-1.5 sm:gap-2 shrink-0"
+        className="p-1.5 sm:p-2 bg-[#111317] border-b border-white/10 flex items-center gap-1 sm:gap-2 shrink-0"
       >
         {!isEditingText && (
           <button
@@ -396,15 +419,15 @@ export const CleanInspector: React.FC<CleanInspectorProps> = ({
             role="tab"
             aria-selected={effectiveTab === 'transition'}
             onClick={() => onChangeTab('transition')}
-            className={`min-h-[44px] flex-1 px-2 sm:px-3 rounded-lg text-xs sm:text-sm font-medium flex items-center justify-center gap-1.5 whitespace-nowrap border ${
+            className={`min-h-[42px] min-w-0 flex-1 px-1.5 sm:px-3 rounded-lg text-[11px] sm:text-sm font-medium flex items-center justify-center gap-1 sm:gap-1.5 whitespace-nowrap border ${
               effectiveTab === 'transition'
                 ? 'bg-[#20242C] text-white border-[#3B82F6]'
                 : 'bg-transparent text-[#9CA3AF] hover:text-white border-transparent'
             }`}
           >
-            <Sliders className="w-4 h-4 text-[#3B82F6] shrink-0" />
-            <span className="sm:hidden">الانتقال</span>
-            <span className="hidden sm:inline">الانتقال / الشيك</span>
+            <TransitionTabIcon className="w-4 h-4 shrink-0" />
+            <span className="sm:hidden truncate">الانتقال</span>
+            <span className="hidden sm:inline">مسار الانتقال</span>
           </button>
         )}
 
@@ -413,14 +436,14 @@ export const CleanInspector: React.FC<CleanInspectorProps> = ({
           role="tab"
           aria-selected={effectiveTab === 'effects'}
           onClick={() => onChangeTab('effects')}
-          className={`min-h-[44px] flex-1 px-2 sm:px-3 rounded-lg text-xs sm:text-sm font-medium flex items-center justify-center gap-1.5 whitespace-nowrap border ${
+          className={`min-h-[42px] min-w-0 flex-1 px-1.5 sm:px-3 rounded-lg text-[11px] sm:text-sm font-medium flex items-center justify-center gap-1 sm:gap-1.5 whitespace-nowrap border ${
             effectiveTab === 'effects'
               ? 'bg-[#20242C] text-white border-[#3B82F6]'
               : 'bg-transparent text-[#9CA3AF] hover:text-white border-transparent'
           }`}
         >
-          <Layers className="w-4 h-4 text-[#3B82F6] shrink-0" />
-          <span className="sm:hidden">التأثيرات ({activeEffects.length})</span>
+          <EffectsTabIcon className="w-4 h-4 shrink-0" />
+          <span className="sm:hidden truncate">التأثيرات ({activeEffects.length})</span>
           <span className="hidden sm:inline">التأثيرات المُركَّبة ({activeEffects.length})</span>
         </button>
 
@@ -430,25 +453,57 @@ export const CleanInspector: React.FC<CleanInspectorProps> = ({
             role="tab"
             aria-selected={effectiveTab === 'text'}
             onClick={() => onChangeTab('text')}
-            className={`min-h-[44px] flex-1 px-2 sm:px-3 rounded-lg text-xs sm:text-sm font-medium flex items-center justify-center gap-1.5 whitespace-nowrap border ${
+            className={`min-h-[42px] min-w-0 flex-1 px-1.5 sm:px-3 rounded-lg text-[11px] sm:text-sm font-medium flex items-center justify-center gap-1 sm:gap-1.5 whitespace-nowrap border ${
               effectiveTab === 'text'
                 ? 'bg-[#20242C] text-white border-[#3B82F6]'
                 : 'bg-transparent text-[#9CA3AF] hover:text-white border-transparent'
             }`}
           >
-            <Type className="w-4 h-4 text-[#3B82F6] shrink-0" />
-            <span className="sm:hidden">النص والألوان</span>
+            <TextLayerIcon className="w-4 h-4 shrink-0" />
+            <span className="sm:hidden truncate">النص</span>
             <span className="hidden sm:inline">النص والخط والألوان</span>
           </button>
         )}
+
+        <button
+          type="button"
+          aria-pressed={slidersLocked}
+          aria-label={slidersLocked ? 'فتح قفل المنزلقات' : 'قفل المنزلقات لمنع التعديل بالخطأ'}
+          title={slidersLocked ? 'فتح قفل المنزلقات' : 'قفل المنزلقات أثناء التصفح'}
+          onClick={() => setSlidersLocked((prev) => !prev)}
+          className={`min-h-[42px] min-w-[40px] px-2 sm:px-2.5 rounded-lg border flex items-center justify-center gap-1 text-[11px] font-medium shrink-0 ${
+            slidersLocked
+              ? 'bg-amber-950/60 border-amber-400/70 text-amber-200'
+              : 'bg-[#181B21] border-white/10 text-[#9CA3AF] hover:text-white'
+          }`}
+        >
+          <SafetyLockIcon locked={slidersLocked} className="w-4 h-4 shrink-0" />
+          <span className="hidden md:inline">{slidersLocked ? 'مقفول' : 'قفل'}</span>
+        </button>
       </div>
 
       {/* Scrollable Inspector Body */}
       <div className="flex-1 min-h-0 overflow-y-auto p-3 lg:p-4 flex flex-col gap-3">
-        {/* TAB 1: Independent Per-Clip Transition / Shake */}
-        {effectiveTab === 'transition' && activeClip && activeAssignment && selectedTransDef && (
+        {slidersLocked && (
+          <div className="bg-amber-950/35 border border-amber-400/30 rounded-lg px-3 py-2 flex items-center justify-between gap-2 text-[11px] text-amber-200">
+            <span className="flex items-center gap-1.5">
+              <SafetyLockIcon locked={true} className="w-3.5 h-3.5 shrink-0" />
+              <span>المنزلقات مقفولة لمنع التعديل غير المقصود أثناء التمرير</span>
+            </span>
+            <button
+              type="button"
+              onClick={() => setSlidersLocked(false)}
+              className="underline font-semibold text-amber-100 shrink-0"
+            >
+              فتح القفل
+            </button>
+          </div>
+        )}
+
+        {/* TAB 1: Unified Cinematic Sequence Timeline Transition + Active Clip Trim */}
+        {effectiveTab === 'transition' && activeClip && (
           <div className="flex flex-col gap-3">
-            {/* Active Clip Info + Image Duration + Trim */}
+            {/* Active Clip Info + Collapsed Mistake-Proof Trim & Duration Drawer */}
             <div className="bg-[#111317] border border-white/10 rounded-lg p-3 flex flex-col gap-2">
               <div className="flex items-center justify-between gap-2">
                 <div className="min-w-0">
@@ -477,9 +532,10 @@ export const CleanInspector: React.FC<CleanInspectorProps> = ({
                   <button
                     type="button"
                     onClick={() => replaceInputRef.current?.click()}
-                    className="min-h-[44px] px-3 bg-[#20242C] hover:bg-[#282D37] text-[#E5E7EB] border border-white/10 rounded-lg text-xs font-medium whitespace-nowrap"
+                    className="min-h-[44px] px-3 bg-[#20242C] hover:bg-[#282D37] text-[#E5E7EB] border border-white/10 rounded-lg text-xs font-medium whitespace-nowrap flex items-center gap-1.5"
                   >
-                    تبديل الملف
+                    <ReplaceMediaIcon className="w-4 h-4 shrink-0" />
+                    <span>تبديل الملف</span>
                   </button>
                   {clips.length > 1 && (
                     <button
@@ -488,143 +544,257 @@ export const CleanInspector: React.FC<CleanInspectorProps> = ({
                       aria-label={`حذف ${activeClip.name}`}
                       className="min-h-[44px] min-w-[44px] bg-[#20242C] hover:bg-red-500/20 text-[#9CA3AF] hover:text-red-300 border border-white/10 rounded-lg flex items-center justify-center"
                     >
-                      <Trash2 className="w-4 h-4" />
+                      <DeleteTrashVectorIcon className="w-4 h-4" />
                     </button>
                   )}
                 </div>
               </div>
 
-              {activeClip.kind === 'image' && (
-                <div className="flex flex-col gap-0.5">
-                  <div className="flex items-center justify-between text-xs">
-                    <label htmlFor={`clip-dur-${activeClip.id}`} className="text-[#9CA3AF]">
-                      مدة الصورة (الافتراضي 3.0ث)
-                    </label>
-                    <span dir="ltr" className="font-mono tabular-nums text-[#F3F4F6]">
-                      {activeClip.imageDurationSec.toFixed(1)}s
-                    </span>
+              {/* Mistake-proof Collapsible Trim & Duration Disclosure Row */}
+              <button
+                type="button"
+                aria-expanded={trimDrawerOpen}
+                onClick={() => setTrimDrawerOpen((prev) => !prev)}
+                className="min-h-[44px] w-full px-3 py-2 bg-[#181B21] hover:bg-[#20242C] border border-white/10 rounded-lg flex items-center justify-between gap-2 text-xs"
+              >
+                <span className="flex items-center gap-2 text-[#E5E7EB] font-medium">
+                  <ScissorsTrimIcon className="w-4 h-4 shrink-0" />
+                  <span>القص والمدة</span>
+                  <span dir="ltr" className="font-mono text-[11px] text-[#9CA3AF]">
+                    ({getEffectiveClipDuration(activeClip).toFixed(1)}s · {activeClip.trimStartSec.toFixed(1)}–{activeClip.trimEndSec.toFixed(1)}s)
+                  </span>
+                </span>
+                <span className="text-[#3B82F6] font-semibold flex items-center gap-1 shrink-0">
+                  <span>{trimDrawerOpen ? 'إخفاء' : 'تعديل'}</span>
+                  {trimDrawerOpen ? (
+                    <MoveUpVectorIcon className="w-4 h-4" />
+                  ) : (
+                    <MoveDownVectorIcon className="w-4 h-4" />
+                  )}
+                </span>
+              </button>
+
+              {trimDrawerOpen && (
+                <div className="pt-2 border-t border-white/10 flex flex-col gap-2">
+                  {activeClip.kind === 'image' && (
+                    <div className="flex flex-col gap-0.5">
+                      <div className="flex items-center justify-between text-xs">
+                        <label
+                          htmlFor={`clip-dur-${activeClip.id}`}
+                          className="text-[#9CA3AF] flex items-center gap-1.5"
+                        >
+                          <ParamControlIcon paramKey="imageDuration" className="w-3.5 h-3.5 shrink-0" />
+                          <span>مدة الصورة (الافتراضي 3.0ث)</span>
+                        </label>
+                        <span dir="ltr" className="font-mono tabular-nums text-[#F3F4F6]">
+                          {activeClip.imageDurationSec.toFixed(1)}s
+                        </span>
+                      </div>
+                      <input
+                        id={`clip-dur-${activeClip.id}`}
+                        type="range"
+                        disabled={slidersLocked}
+                        min={MIN_CLIP_DURATION_SEC}
+                        max={MAX_IMAGE_DURATION_SEC}
+                        step={0.1}
+                        value={activeClip.imageDurationSec}
+                        onChange={(e) => onUpdateImageDuration(activeClip.id, Number(e.target.value))}
+                        className="studio-slider disabled:opacity-45"
+                      />
+                    </div>
+                  )}
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {(() => {
+                      const maxDur =
+                        activeClip.kind === 'image'
+                          ? activeClip.imageDurationSec
+                          : activeClip.sourceDurationSec;
+                      return (
+                        <>
+                          <div className="flex flex-col gap-0.5">
+                            <div className="flex items-center justify-between text-xs">
+                              <label
+                                htmlFor={`trim-s-${activeClip.id}`}
+                                className="text-[#9CA3AF] flex items-center gap-1.5"
+                              >
+                                <ParamControlIcon paramKey="trimStart" className="w-3.5 h-3.5 shrink-0" />
+                                <span>بداية القص</span>
+                              </label>
+                              <span dir="ltr" className="font-mono tabular-nums text-[#F3F4F6]">
+                                {activeClip.trimStartSec.toFixed(1)}s
+                              </span>
+                            </div>
+                            <input
+                              id={`trim-s-${activeClip.id}`}
+                              type="range"
+                              disabled={slidersLocked}
+                              min={0}
+                              max={Math.max(0, maxDur - 0.2)}
+                              step={0.1}
+                              value={activeClip.trimStartSec}
+                              onChange={(e) =>
+                                onUpdateTrim(activeClip.id, Number(e.target.value), activeClip.trimEndSec)
+                              }
+                              className="studio-slider disabled:opacity-45"
+                            />
+                          </div>
+
+                          <div className="flex flex-col gap-0.5">
+                            <div className="flex items-center justify-between text-xs">
+                              <label
+                                htmlFor={`trim-e-${activeClip.id}`}
+                                className="text-[#9CA3AF] flex items-center gap-1.5"
+                              >
+                                <ParamControlIcon paramKey="trimEnd" className="w-3.5 h-3.5 shrink-0" />
+                                <span>نهاية القص</span>
+                              </label>
+                              <span dir="ltr" className="font-mono tabular-nums text-[#F3F4F6]">
+                                {activeClip.trimEndSec.toFixed(1)}s
+                              </span>
+                            </div>
+                            <input
+                              id={`trim-e-${activeClip.id}`}
+                              type="range"
+                              disabled={slidersLocked}
+                              min={Math.min(maxDur, activeClip.trimStartSec + 0.2)}
+                              max={maxDur}
+                              step={0.1}
+                              value={activeClip.trimEndSec}
+                              onChange={(e) =>
+                                onUpdateTrim(activeClip.id, activeClip.trimStartSec, Number(e.target.value))
+                              }
+                              className="studio-slider disabled:opacity-45"
+                            />
+                          </div>
+                        </>
+                      );
+                    })()}
                   </div>
-                  <input
-                    id={`clip-dur-${activeClip.id}`}
-                    type="range"
-                    min={MIN_CLIP_DURATION_SEC}
-                    max={MAX_IMAGE_DURATION_SEC}
-                    step={0.1}
-                    value={activeClip.imageDurationSec}
-                    onChange={(e) => onUpdateImageDuration(activeClip.id, Number(e.target.value))}
-                    className="studio-slider"
-                  />
                 </div>
               )}
+            </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                {(() => {
-                  const maxDur =
-                    activeClip.kind === 'image'
-                      ? activeClip.imageDurationSec
-                      : activeClip.sourceDurationSec;
+            {/* Unified Sequence Timeline Banner + Fast Edit / Hard Edit 1-Tap Pacing Bar */}
+            <div className="bg-[#111317] border border-white/10 rounded-lg p-2.5 flex flex-col gap-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="flex items-center gap-2 text-xs font-semibold text-[#E5E7EB]">
+                  <SequenceFlowIcon className="w-4 h-4 shrink-0" />
+                  <span>إيقاع المسار الموحّد (كل اللقطات)</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={onResetSequenceTransition}
+                  aria-label="إعادة ضبط إعدادات الانتقال"
+                  className="min-h-[34px] px-2.5 bg-[#181B21] hover:bg-[#20242C] border border-white/10 rounded-md text-[11px] font-medium text-[#D1D5DB] flex items-center gap-1"
+                >
+                  <ResetParamIcon className="w-3.5 h-3.5 shrink-0" />
+                  <span>إعادة ضبط</span>
+                </button>
+              </div>
+
+              <div
+                role="group"
+                aria-label="أوضاع الإيقاع السريع والقوي"
+                className="grid grid-cols-3 gap-1.5"
+              >
+                {[
+                  {
+                    id: 'balanced' as const,
+                    label: 'متزن',
+                    icon: <BalancedWaveIcon className="w-4 h-4 shrink-0" />,
+                  },
+                  {
+                    id: 'fast-edit' as const,
+                    label: 'تعديل سريع',
+                    icon: <FastEditBoltIcon className="w-4 h-4 shrink-0" />,
+                  },
+                  {
+                    id: 'hard-edit' as const,
+                    label: 'تعديل قوي',
+                    icon: <HardEditFlameIcon className="w-4 h-4 shrink-0" />,
+                  },
+                ].map((mode) => {
+                  const active = sequenceTransition.pacingPreset === mode.id;
                   return (
-                    <>
-                      <div className="flex flex-col gap-0.5">
-                        <div className="flex items-center justify-between text-xs">
-                          <label htmlFor={`trim-s-${activeClip.id}`} className="text-[#9CA3AF]">
-                            بداية القص
-                          </label>
-                          <span dir="ltr" className="font-mono tabular-nums text-[#F3F4F6]">
-                            {activeClip.trimStartSec.toFixed(1)}s
-                          </span>
-                        </div>
-                        <input
-                          id={`trim-s-${activeClip.id}`}
-                          type="range"
-                          min={0}
-                          max={Math.max(0, maxDur - 0.2)}
-                          step={0.1}
-                          value={activeClip.trimStartSec}
-                          onChange={(e) =>
-                            onUpdateTrim(activeClip.id, Number(e.target.value), activeClip.trimEndSec)
-                          }
-                          className="studio-slider"
-                        />
-                      </div>
-
-                      <div className="flex flex-col gap-0.5">
-                        <div className="flex items-center justify-between text-xs">
-                          <label htmlFor={`trim-e-${activeClip.id}`} className="text-[#9CA3AF]">
-                            نهاية القص
-                          </label>
-                          <span dir="ltr" className="font-mono tabular-nums text-[#F3F4F6]">
-                            {activeClip.trimEndSec.toFixed(1)}s
-                          </span>
-                        </div>
-                        <input
-                          id={`trim-e-${activeClip.id}`}
-                          type="range"
-                          min={Math.min(maxDur, activeClip.trimStartSec + 0.2)}
-                          max={maxDur}
-                          step={0.1}
-                          value={activeClip.trimEndSec}
-                          onChange={(e) =>
-                            onUpdateTrim(activeClip.id, activeClip.trimStartSec, Number(e.target.value))
-                          }
-                          className="studio-slider"
-                        />
-                      </div>
-                    </>
+                    <button
+                      key={mode.id}
+                      type="button"
+                      aria-pressed={active}
+                      onClick={() => onChangePacingPreset(mode.id)}
+                      className={`min-h-[40px] px-2 rounded-lg border text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors ${
+                        active
+                          ? 'bg-[#20242C] border-[#3B82F6] text-white'
+                          : 'bg-[#181B21] hover:bg-[#20242C] border-white/10 text-[#9CA3AF] hover:text-white'
+                      }`}
+                    >
+                      {mode.icon}
+                      <span>{mode.label}</span>
+                    </button>
                   );
-                })()}
+                })}
               </div>
             </div>
 
-            {/* Clean Module Cards (Name + 1-line description ONLY) */}
+            {/* Cohesive Sequence Transition Selector */}
             <div className="flex flex-col gap-2">
-              <div className="text-xs font-semibold text-[#9CA3AF]">
-                اختر انتقال أو شيك لـ «{clips.length === 1 ? 'اللقطة' : `اللقطة ${activeClipIndex + 1}`}» بشكل مستقل
+              <div className="text-xs font-semibold text-[#9CA3AF] flex items-center gap-1.5">
+                <TransitionTabIcon className="w-4 h-4 shrink-0" />
+                <span>انتقال المسار السينمائي الموحّد</span>
               </div>
               {TRANSITION_REGISTRY.map((mod) => {
-                const selected = activeAssignment.transitionId === mod.id;
+                const selected = sequenceTransition.transitionId === mod.id;
                 return (
                   <button
                     key={mod.id}
                     type="button"
-                    onClick={() => onSelectClipTransition(activeClip.id, mod.id)}
-                    className={`min-h-[56px] w-full text-right p-3 rounded-lg border flex flex-col gap-1 ${
+                    aria-pressed={selected}
+                    onClick={() => onSelectSequenceTransition(mod.id)}
+                    className={`min-h-[60px] w-full text-right p-2.5 sm:p-3 rounded-lg border flex items-center gap-3 ${
                       selected
                         ? 'bg-[#20242C] border-[#3B82F6] text-white'
                         : 'bg-[#111317] border-white/10 text-[#D1D5DB] hover:bg-[#1C2027]'
                     }`}
                   >
-                    <span className="text-xs sm:text-sm font-semibold">{mod.name}</span>
-                    <span className="text-xs text-[#9CA3AF] truncate w-full">
-                      {mod.description}
-                    </span>
+                    <TransitionModuleIcon id={mod.id} className="w-8 h-8 shrink-0" />
+                    <div className="min-w-0 flex-1 flex flex-col gap-0.5">
+                      <span className="text-xs sm:text-sm font-semibold truncate">{mod.name}</span>
+                      <span className="text-xs text-[#9CA3AF] truncate w-full">
+                        {mod.description}
+                      </span>
+                    </div>
                   </button>
                 );
               })}
             </div>
 
-            {/* Dedicated Controls ONLY for selected Transition */}
+            {/* Dedicated Controls ONLY for active Sequence Transition */}
             {(selectedTransDef.params.length > 0 ||
               (selectedTransDef.toggles?.length ?? 0) > 0 ||
               (selectedTransDef.selects?.length ?? 0) > 0) && (
               <div className="bg-[#111317] border border-white/10 rounded-lg p-3 flex flex-col gap-2.5">
-                <div className="text-xs font-semibold text-[#F3F4F6]">
-                  إعدادات: {selectedTransDef.name}
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-semibold text-[#F3F4F6] flex items-center gap-1.5 truncate">
+                    <EditSlidersVectorIcon className="w-4 h-4 shrink-0" />
+                    <span className="truncate">إعدادات: {selectedTransDef.name}</span>
+                  </span>
                 </div>
 
                 {selectedTransDef.selects?.map((sel) => {
-                  const val = activeAssignment.selects?.[sel.key] ?? sel.defaultValue;
+                  const val = sequenceTransition.selects?.[sel.key] ?? sel.defaultValue;
                   return (
                     <div key={sel.key} className="flex items-center justify-between gap-2">
-                      <label htmlFor={`tr-sel-${sel.key}`} className="text-xs text-[#9CA3AF]">
-                        {sel.label}
+                      <label
+                        htmlFor={`tr-sel-${sel.key}`}
+                        className="text-xs text-[#9CA3AF] flex items-center gap-1.5"
+                      >
+                        <ParamControlIcon paramKey={sel.key} className="w-4 h-4 shrink-0" />
+                        <span>{sel.label}</span>
                       </label>
                       <select
                         id={`tr-sel-${sel.key}`}
                         value={val}
-                        onChange={(e) =>
-                          onUpdateClipTransitionSelect(activeClip.id, sel.key, e.target.value)
-                        }
+                        onChange={(e) => onUpdateSequenceSelect(sel.key, e.target.value)}
                         className="min-h-[44px] px-3 bg-[#181B21] border border-white/10 rounded-lg text-xs text-white"
                       >
                         {sel.options.map((o) => (
@@ -638,18 +808,19 @@ export const CleanInspector: React.FC<CleanInspectorProps> = ({
                 })}
 
                 {selectedTransDef.toggles?.map((tog) => {
-                  const checked = activeAssignment.toggles?.[tog.key] ?? tog.defaultValue;
+                  const checked = sequenceTransition.toggles?.[tog.key] ?? tog.defaultValue;
                   return (
                     <div key={tog.key} className="flex items-center justify-between gap-2">
-                      <span className="text-xs text-[#D1D5DB]">{tog.label}</span>
+                      <span className="text-xs text-[#D1D5DB] flex items-center gap-1.5">
+                        <ParamControlIcon paramKey={tog.key} className="w-4 h-4 shrink-0" />
+                        <span>{tog.label}</span>
+                      </span>
                       <button
                         type="button"
                         role="switch"
                         aria-checked={checked}
                         aria-label={tog.label}
-                        onClick={() =>
-                          onUpdateClipTransitionToggle(activeClip.id, tog.key, !checked)
-                        }
+                        onClick={() => onUpdateSequenceToggle(tog.key, !checked)}
                         className={`min-h-[32px] w-14 rounded-full p-1 flex items-center shrink-0 ${
                           checked ? 'bg-[#3B82F6] justify-end' : 'bg-[#20242C] justify-start'
                         }`}
@@ -661,12 +832,16 @@ export const CleanInspector: React.FC<CleanInspectorProps> = ({
                 })}
 
                 {selectedTransDef.params.map((p) => {
-                  const val = activeAssignment.values[p.key] ?? p.defaultValue;
+                  const val = sequenceTransition.values[p.key] ?? p.defaultValue;
                   return (
                     <div key={p.key} className="flex flex-col gap-0.5">
                       <div className="flex items-center justify-between text-xs">
-                        <label htmlFor={`tr-${p.key}`} className="text-[#9CA3AF]">
-                          {p.label}
+                        <label
+                          htmlFor={`tr-${p.key}`}
+                          className="text-[#9CA3AF] flex items-center gap-1.5"
+                        >
+                          <ParamControlIcon paramKey={p.key} className="w-4 h-4 shrink-0" />
+                          <span>{p.label}</span>
                         </label>
                         <span dir="ltr" className="font-mono tabular-nums text-[#F3F4F6]">
                           {val}
@@ -676,18 +851,13 @@ export const CleanInspector: React.FC<CleanInspectorProps> = ({
                       <input
                         id={`tr-${p.key}`}
                         type="range"
+                        disabled={slidersLocked}
                         min={p.min}
                         max={p.max}
                         step={p.step}
                         value={val}
-                        onChange={(e) =>
-                          onUpdateClipTransitionParam(
-                            activeClip.id,
-                            p.key,
-                            Number(e.target.value)
-                          )
-                        }
-                        className="studio-slider"
+                        onChange={(e) => onUpdateSequenceParam(p.key, Number(e.target.value))}
+                        className="studio-slider disabled:opacity-45"
                       />
                     </div>
                   );
@@ -697,12 +867,13 @@ export const CleanInspector: React.FC<CleanInspectorProps> = ({
           </div>
         )}
 
-        {/* TAB 2: Attachable Effect Modifiers (with EXPLICIT Target Label on every row) */}
+        {/* TAB 2: Attachable Effect Modifiers */}
         {effectiveTab === 'effects' && (
           <div className="flex flex-col gap-3">
             <div className="flex items-center justify-between text-xs text-[#9CA3AF] bg-[#111317] border border-white/10 rounded-lg px-3 py-2">
-              <span className="truncate">
-                التأثيرات النشطة على:{' '}
+              <span className="truncate flex items-center gap-1.5">
+                <EffectsTabIcon className="w-4 h-4 shrink-0" />
+                <span>التأثيرات النشطة على:</span>
                 <strong className="text-[#F3F4F6]">
                   {isEditingText
                     ? 'طبقات النصوص'
@@ -731,43 +902,46 @@ export const CleanInspector: React.FC<CleanInspectorProps> = ({
                       data-testid={`effect-row-${idx}`}
                       className="bg-[#111317] border border-white/10 rounded-lg p-2.5 flex flex-col gap-2"
                     >
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="min-w-0 flex-1">
-                          <div className="text-xs sm:text-sm font-semibold text-[#F3F4F6] truncate">
-                            {def.name}
-                          </div>
-                          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] pt-0.5">
-                            <span className="text-[#E5E7EB]">
-                              الهدف: <strong className="text-[#3B82F6]">{targetLabel}</strong>
-                            </span>
-                            <span className="text-[#6B7280]">·</span>
-                            <button
-                              type="button"
-                              onClick={() => handleCyclePlacement(fx.instanceId)}
-                              className="text-[#9CA3AF] hover:text-white underline decoration-dotted"
-                              title="تغيير موضع الطبقة (خلف/أمام اللقطة أو النص)"
-                            >
-                              {PLACEMENT_LABELS[fx.placement]}
-                            </button>
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                        <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                          <EffectModifierIcon id={fx.effectId} className="w-7 h-7 shrink-0" />
+                          <div className="min-w-0 flex-1">
+                            <div className="text-xs sm:text-sm font-semibold text-[#F3F4F6] truncate">
+                              {def.name}
+                            </div>
+                            <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] pt-0.5">
+                              <span className="text-[#E5E7EB]">
+                                الهدف: <strong className="text-[#3B82F6]">{targetLabel}</strong>
+                              </span>
+                              <span className="text-[#6B7280]">·</span>
+                              <button
+                                type="button"
+                                onClick={() => handleCyclePlacement(fx.instanceId)}
+                                className="text-[#9CA3AF] hover:text-white underline decoration-dotted"
+                                title="تغيير موضع الطبقة (خلف/أمام اللقطة أو النص)"
+                              >
+                                {PLACEMENT_LABELS[fx.placement]}
+                              </button>
+                            </div>
                           </div>
                         </div>
 
-                        <div className="flex items-center gap-1 shrink-0">
+                        <div className="flex items-center justify-end gap-1.5 shrink-0 pt-1.5 sm:pt-0 border-t border-white/5 sm:border-t-0">
                           <button
                             type="button"
                             onClick={() => handleMoveEffect(idx, 'up')}
                             aria-label={`تحريك ${def.name} للأعلى`}
-                            className="min-h-[44px] min-w-[40px] bg-[#20242C] hover:bg-[#282D37] text-[#E5E7EB] border border-white/10 rounded-lg flex items-center justify-center"
+                            className="min-h-[44px] min-w-[38px] bg-[#20242C] hover:bg-[#282D37] text-[#E5E7EB] border border-white/10 rounded-lg flex items-center justify-center"
                           >
-                            <ChevronUp className="w-4 h-4" />
+                            <MoveUpVectorIcon className="w-4 h-4" />
                           </button>
                           <button
                             type="button"
                             onClick={() => handleMoveEffect(idx, 'down')}
                             aria-label={`تحريك ${def.name} للأسفل`}
-                            className="min-h-[44px] min-w-[40px] bg-[#20242C] hover:bg-[#282D37] text-[#E5E7EB] border border-white/10 rounded-lg flex items-center justify-center"
+                            className="min-h-[44px] min-w-[38px] bg-[#20242C] hover:bg-[#282D37] text-[#E5E7EB] border border-white/10 rounded-lg flex items-center justify-center"
                           >
-                            <ChevronDown className="w-4 h-4" />
+                            <MoveDownVectorIcon className="w-4 h-4" />
                           </button>
                           <button
                             type="button"
@@ -776,13 +950,14 @@ export const CleanInspector: React.FC<CleanInspectorProps> = ({
                             }
                             aria-expanded={expanded}
                             aria-label={`تعديل إعدادات ${def.name}`}
-                            className={`min-h-[44px] px-2.5 border rounded-lg text-xs font-medium ${
+                            className={`min-h-[44px] px-2.5 border rounded-lg text-xs font-medium flex items-center gap-1.5 ${
                               expanded
                                 ? 'bg-[#3B82F6] text-white border-[#3B82F6]'
                                 : 'bg-[#20242C] text-[#E5E7EB] border-white/10'
                             }`}
                           >
-                            تعديل
+                            <EditSlidersVectorIcon className="w-4 h-4 shrink-0" />
+                            <span>تعديل</span>
                           </button>
                           <button
                             type="button"
@@ -792,21 +967,40 @@ export const CleanInspector: React.FC<CleanInspectorProps> = ({
                               )
                             }
                             aria-label={`إزالة ${def.name}`}
-                            className="min-h-[44px] min-w-[40px] bg-[#20242C] hover:bg-red-500/20 text-[#9CA3AF] hover:text-red-300 border border-white/10 rounded-lg flex items-center justify-center"
+                            className="min-h-[44px] min-w-[40px] bg-red-950/30 hover:bg-red-500/25 text-red-300/80 hover:text-red-200 border border-red-500/20 rounded-lg flex items-center justify-center"
                           >
-                            <X className="w-4 h-4" />
+                            <DeleteTrashVectorIcon className="w-4 h-4" />
                           </button>
                         </div>
                       </div>
 
                       {expanded && (
-                        <div className="pt-2 border-t border-white/10 flex flex-col gap-2">
+                        <div className="pt-2 border-t border-white/10 flex flex-col gap-2.5">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-[11px] font-semibold text-[#9CA3AF]">
+                              خيارات: {def.name}
+                            </span>
+                            {onResetEffect && (
+                              <button
+                                type="button"
+                                onClick={() => onResetEffect(fx.instanceId)}
+                                className="min-h-[30px] px-2 bg-[#181B21] hover:bg-[#20242C] border border-white/10 rounded-md text-[11px] text-[#D1D5DB] flex items-center gap-1"
+                              >
+                                <ResetParamIcon className="w-3.5 h-3.5 shrink-0" />
+                                <span>افتراضي</span>
+                              </button>
+                            )}
+                          </div>
+
                           {isEditingText && (
                             <div className="flex items-center justify-between gap-2">
-                              <span className="text-xs text-[#9CA3AF]">النص المستهدف</span>
+                              <span className="text-xs text-[#9CA3AF] flex items-center gap-1.5">
+                                <TextLayerIcon className="w-4 h-4 shrink-0" />
+                                <span>النص المستهدف</span>
+                              </span>
                               <select
                                 aria-label={`النص المستهدف لتأثير ${def.name}`}
-                                value={fx.targetTextSlot ?? 'all'}
+                                value={fx.targetTextSlot ?? 'overlayText'}
                                 onChange={(e) =>
                                   onUpdateActiveEffects(
                                     activeEffects.map((item) =>
@@ -828,7 +1022,10 @@ export const CleanInspector: React.FC<CleanInspectorProps> = ({
                           )}
 
                           <div className="flex items-center justify-between gap-2">
-                            <span className="text-xs text-[#9CA3AF]">موضع الطبقة (Z-Index)</span>
+                            <span className="text-xs text-[#9CA3AF] flex items-center gap-1.5">
+                              <EffectsTabIcon className="w-4 h-4 shrink-0" />
+                              <span>موضع الطبقة (Z-Index)</span>
+                            </span>
                             <select
                               aria-label={`موضع طبقة ${def.name}`}
                               value={fx.placement}
@@ -850,49 +1047,252 @@ export const CleanInspector: React.FC<CleanInspectorProps> = ({
                             </select>
                           </div>
 
-                          {def.params.map((p) => {
-                            const val = fx.values[p.key] ?? p.defaultValue;
-                            return (
-                              <div key={p.key} className="flex flex-col gap-0.5">
-                                <div className="flex items-center justify-between text-xs">
-                                  <label
-                                    htmlFor={`fx-${fx.instanceId}-${p.key}`}
-                                    className="text-[#9CA3AF]"
-                                  >
-                                    {p.label}
-                                  </label>
-                                  <span dir="ltr" className="font-mono tabular-nums text-[#F3F4F6]">
-                                    {val}
-                                    {p.unit ?? ''}
+                          {/* Color Presets + Custom Picker */}
+                          {def.presets && def.supportsColor && (
+                            <div className="bg-[#181B21] border border-white/10 rounded-lg p-2.5 flex flex-col gap-2">
+                              <div className="flex items-center justify-between text-xs">
+                                <span className="text-[#D1D5DB] font-medium flex items-center gap-1.5">
+                                  <ColorPaletteVectorIcon className="w-4 h-4 shrink-0" />
+                                  <span>لون النار والهالة</span>
+                                </span>
+                                <span dir="ltr" className="font-mono text-[#9CA3AF] uppercase">
+                                  {fx.colorHex || def.defaultColorHex || '#D81B45'}
+                                </span>
+                              </div>
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                {def.presets.map((pr) => {
+                                  const activePreset = (fx.selects?.preset ?? 'crimson') === pr.value;
+                                  return (
+                                    <button
+                                      key={pr.value}
+                                      type="button"
+                                      onClick={() =>
+                                        onUpdateActiveEffects(
+                                          activeEffects.map((item) =>
+                                            item.instanceId === fx.instanceId
+                                              ? {
+                                                  ...item,
+                                                  colorHex: pr.hex,
+                                                  selects: {
+                                                    ...(item.selects ?? {}),
+                                                    preset: pr.value,
+                                                  },
+                                                }
+                                              : item
+                                          )
+                                        )
+                                      }
+                                      className={`min-h-[38px] px-2.5 rounded-md border text-xs flex items-center gap-1.5 ${
+                                        activePreset
+                                          ? 'bg-[#20242C] border-[#3B82F6] text-white font-semibold'
+                                          : 'bg-[#111317] border-white/15 text-[#D1D5DB]'
+                                      }`}
+                                    >
+                                      <span
+                                        className="w-3.5 h-3.5 rounded-full border border-white/30 shrink-0"
+                                        style={{ backgroundColor: pr.hex }}
+                                      />
+                                      <span>{pr.label}</span>
+                                    </button>
+                                  );
+                                })}
+                                <label
+                                  aria-label="اختيار لون مخصص للنار الكونية"
+                                  className="min-h-[38px] px-2.5 rounded-md bg-[#111317] border border-white/15 text-xs text-[#D1D5DB] flex items-center gap-1.5 cursor-pointer"
+                                >
+                                  <ColorPaletteVectorIcon className="w-3.5 h-3.5" />
+                                  <span>مخصص</span>
+                                  <input
+                                    type="color"
+                                    value={fx.colorHex || '#D81B45'}
+                                    onChange={(e) =>
+                                      onUpdateActiveEffects(
+                                        activeEffects.map((item) =>
+                                          item.instanceId === fx.instanceId
+                                            ? {
+                                                ...item,
+                                                colorHex: e.target.value,
+                                                selects: {
+                                                  ...(item.selects ?? {}),
+                                                  preset: 'custom',
+                                                },
+                                              }
+                                            : item
+                                        )
+                                      )
+                                    }
+                                    className="sr-only"
+                                  />
+                                </label>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Effect Selects */}
+                          {def.selects
+                            ?.filter((s) => s.key !== 'preset')
+                            .map((sel) => {
+                              const sVal = fx.selects?.[sel.key] ?? sel.defaultValue;
+                              return (
+                                <div key={sel.key} className="flex items-center justify-between gap-2">
+                                  <span className="text-xs text-[#9CA3AF] flex items-center gap-1.5">
+                                    <ParamControlIcon paramKey={sel.key} className="w-4 h-4 shrink-0" />
+                                    <span>{sel.label}</span>
                                   </span>
+                                  <select
+                                    aria-label={sel.label}
+                                    value={sVal}
+                                    onChange={(e) =>
+                                      onUpdateActiveEffects(
+                                        activeEffects.map((item) =>
+                                          item.instanceId === fx.instanceId
+                                            ? {
+                                                ...item,
+                                                selects: {
+                                                  ...(item.selects ?? {}),
+                                                  [sel.key]: e.target.value,
+                                                },
+                                              }
+                                            : item
+                                        )
+                                      )
+                                    }
+                                    className="min-h-[44px] px-2 bg-[#181B21] border border-white/10 rounded-lg text-xs text-[#F3F4F6]"
+                                  >
+                                    {sel.options.map((o) => (
+                                      <option key={o.value} value={o.value}>
+                                        {o.label}
+                                      </option>
+                                    ))}
+                                  </select>
                                 </div>
-                                <input
-                                  id={`fx-${fx.instanceId}-${p.key}`}
-                                  type="range"
-                                  min={p.min}
-                                  max={p.max}
-                                  step={p.step}
-                                  value={val}
-                                  onChange={(e) =>
+                              );
+                            })}
+
+                          {/* Effect Toggles */}
+                          {def.toggles?.map((tog) => {
+                            const checked = fx.toggles?.[tog.key] ?? tog.defaultValue;
+                            return (
+                              <div key={tog.key} className="flex items-center justify-between gap-2">
+                                <span className="text-xs text-[#D1D5DB] flex items-center gap-1.5">
+                                  <ParamControlIcon paramKey={tog.key} className="w-4 h-4 shrink-0" />
+                                  <span>{tog.label}</span>
+                                </span>
+                                <button
+                                  type="button"
+                                  role="switch"
+                                  aria-checked={checked}
+                                  aria-label={tog.label}
+                                  onClick={() =>
                                     onUpdateActiveEffects(
                                       activeEffects.map((item) =>
                                         item.instanceId === fx.instanceId
                                           ? {
                                               ...item,
-                                              values: {
-                                                ...item.values,
-                                                [p.key]: Number(e.target.value),
+                                              toggles: {
+                                                ...(item.toggles ?? {}),
+                                                [tog.key]: !checked,
                                               },
                                             }
                                           : item
                                       )
                                     )
                                   }
-                                  className="studio-slider"
-                                />
+                                  className={`min-h-[30px] w-13 rounded-full p-1 flex items-center shrink-0 ${
+                                    checked ? 'bg-[#3B82F6] justify-end' : 'bg-[#20242C] justify-start'
+                                  }`}
+                                >
+                                  <span className="w-5 h-5 rounded-full bg-white" />
+                                </button>
                               </div>
                             );
                           })}
+
+                          {/* Primary + Collapsible Advanced Sliders */}
+                          {(() => {
+                            const splitIdx = def.params.length > 5 ? 4 : def.params.length;
+                            const primaryParams = def.params.slice(0, splitIdx);
+                            const advancedParams = def.params.slice(splitIdx);
+                            const advOpen = Boolean(showAdvancedFxParams[fx.instanceId]);
+
+                            const renderParamSlider = (p: (typeof def.params)[number]) => {
+                              const val = fx.values[p.key] ?? p.defaultValue;
+                              return (
+                                <div key={p.key} className="flex flex-col gap-0.5">
+                                  <div className="flex items-center justify-between text-xs">
+                                    <label
+                                      htmlFor={`fx-${fx.instanceId}-${p.key}`}
+                                      className="text-[#9CA3AF] flex items-center gap-1.5"
+                                    >
+                                      <ParamControlIcon paramKey={p.key} className="w-3.5 h-3.5 shrink-0" />
+                                      <span>{p.label}</span>
+                                    </label>
+                                    <span dir="ltr" className="font-mono tabular-nums text-[#F3F4F6]">
+                                      {val}
+                                      {p.unit ?? ''}
+                                    </span>
+                                  </div>
+                                  <input
+                                    id={`fx-${fx.instanceId}-${p.key}`}
+                                    type="range"
+                                    disabled={slidersLocked}
+                                    min={p.min}
+                                    max={p.max}
+                                    step={p.step}
+                                    value={val}
+                                    onChange={(e) =>
+                                      onUpdateActiveEffects(
+                                        activeEffects.map((item) =>
+                                          item.instanceId === fx.instanceId
+                                            ? {
+                                                ...item,
+                                                values: {
+                                                  ...item.values,
+                                                  [p.key]: Number(e.target.value),
+                                                },
+                                              }
+                                            : item
+                                        )
+                                      )
+                                    }
+                                    className="studio-slider disabled:opacity-45"
+                                  />
+                                </div>
+                              );
+                            };
+
+                            return (
+                              <>
+                                {primaryParams.map(renderParamSlider)}
+                                {advancedParams.length > 0 && (
+                                  <div className="pt-1">
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        setShowAdvancedFxParams((prev) => ({
+                                          ...prev,
+                                          [fx.instanceId]: !advOpen,
+                                        }))
+                                      }
+                                      className="min-h-[40px] w-full px-3 bg-[#181B21] hover:bg-[#20242C] border border-white/10 rounded-lg text-xs text-[#D1D5DB] flex items-center justify-between"
+                                    >
+                                      <span>إعدادات متقدمة ({advancedParams.length})</span>
+                                      {advOpen ? (
+                                        <MoveUpVectorIcon className="w-4 h-4" />
+                                      ) : (
+                                        <MoveDownVectorIcon className="w-4 h-4" />
+                                      )}
+                                    </button>
+                                    {advOpen && (
+                                      <div className="pt-2 flex flex-col gap-1.5">
+                                        {advancedParams.map(renderParamSlider)}
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+                              </>
+                            );
+                          })()}
                         </div>
                       )}
                     </div>
@@ -907,11 +1307,11 @@ export const CleanInspector: React.FC<CleanInspectorProps> = ({
               onClick={handleRequestAddEffect}
               className="min-h-[44px] w-full px-4 bg-[#20242C] hover:bg-[#282D37] text-white border border-white/15 rounded-lg text-xs sm:text-sm font-semibold flex items-center justify-center gap-2"
             >
-              <Plus className="w-4 h-4 text-[#3B82F6]" />
+              <PlusAddVectorIcon className="w-4 h-4" />
               <span>إضافة تأثير</span>
             </button>
 
-            {/* Effect Registry Picker */}
+            {/* Effect Registry Picker with Custom Drawn Icons */}
             {showAddPicker && (
               <div
                 data-testid="effect-picker"
@@ -959,12 +1359,15 @@ export const CleanInspector: React.FC<CleanInspectorProps> = ({
                       onAddEffect(eff.id, isEditingText ? pendingTargetSlot : undefined);
                       setShowAddPicker(false);
                     }}
-                    className="min-h-[52px] w-full text-right p-2.5 bg-[#181B21] hover:bg-[#20242C] border border-white/10 rounded-lg flex flex-col gap-0.5"
+                    className="min-h-[54px] w-full text-right p-2.5 bg-[#181B21] hover:bg-[#20242C] border border-white/10 rounded-lg flex items-center gap-3"
                   >
-                    <span className="text-xs font-semibold text-[#F3F4F6]">{eff.name}</span>
-                    <span className="text-[11px] text-[#9CA3AF] truncate w-full">
-                      {eff.description}
-                    </span>
+                    <EffectModifierIcon id={eff.id} className="w-7 h-7 shrink-0" />
+                    <div className="min-w-0 flex-1 flex flex-col gap-0.5">
+                      <span className="text-xs font-semibold text-[#F3F4F6] truncate">{eff.name}</span>
+                      <span className="text-[11px] text-[#9CA3AF] truncate w-full">
+                        {eff.description}
+                      </span>
+                    </div>
                   </button>
                 ))}
               </div>
@@ -972,12 +1375,36 @@ export const CleanInspector: React.FC<CleanInspectorProps> = ({
           </div>
         )}
 
-        {/* TAB 3: Clean Self-Documenting Text + Color Chips (Zero Wall-of-Buttons Clutter) */}
+        {/* TAB 3: Text & Typography & Colors */}
         {effectiveTab === 'text' && hasTextLayer && (
           <div className="flex flex-col gap-2.5">
+            <div className="text-xs font-semibold text-[#9CA3AF] flex items-center gap-1.5">
+              <TextLayerIcon className="w-4 h-4 shrink-0" />
+              <span>النص المستقل (ثابت طوال الفيديو — متوافق مع النار الكونية)</span>
+            </div>
+            <CompactTextCard
+              idPrefix="overlay-text"
+              roleLabel="النص المستقل"
+              textValue={textConfig.overlayText}
+              onChangeText={(val) => onChangeTextConfig({ ...textConfig, overlayText: val })}
+              primaryColorLabel="لون الوجه"
+              primaryColor={textConfig.overlayTextColor}
+              onChangePrimaryColor={(hex) =>
+                onChangeTextConfig({ ...textConfig, overlayTextColor: hex })
+              }
+              openPickerKey={openColorPickerKey}
+              onTogglePicker={(k) =>
+                setOpenColorPickerKey((prev) => (prev === k ? null : k))
+              }
+              toggleChecked={textConfig.overlayTextEnabled}
+              onToggleChecked={(checked) =>
+                onChangeTextConfig({ ...textConfig, overlayTextEnabled: checked })
+              }
+            />
+
             {isCosmicActive && (
               <>
-                <div className="text-xs font-semibold text-[#9CA3AF]">
+                <div className="text-xs font-semibold text-[#9CA3AF] pt-1">
                   نصوص وألوان «سلايد كربلاء الكوني»
                 </div>
                 <CompactTextCard
@@ -1125,7 +1552,10 @@ export const CleanInspector: React.FC<CleanInspectorProps> = ({
             {/* Auto-scale & Local Font Loader */}
             <div className="bg-[#111317] border border-white/10 rounded-lg p-3 flex flex-col gap-2">
               <div className="flex items-center justify-between gap-2">
-                <span className="text-xs text-[#E5E7EB]">ضبط الحجم تلقائياً لمنع القص</span>
+                <span className="text-xs text-[#E5E7EB] flex items-center gap-1.5">
+                  <ParamControlIcon paramKey="autoScale" className="w-4 h-4 shrink-0" />
+                  <span>ضبط الحجم تلقائياً لمنع القص</span>
+                </span>
                 <button
                   type="button"
                   role="switch"
@@ -1146,8 +1576,9 @@ export const CleanInspector: React.FC<CleanInspectorProps> = ({
 
               <div className="flex flex-col gap-0.5">
                 <div className="flex justify-between text-xs">
-                  <label htmlFor="txt-scale" className="text-[#9CA3AF]">
-                    حجم الخط
+                  <label htmlFor="txt-scale" className="text-[#9CA3AF] flex items-center gap-1.5">
+                    <ParamControlIcon paramKey="fontScale" className="w-4 h-4 shrink-0" />
+                    <span>حجم الخط</span>
                   </label>
                   <span dir="ltr" className="font-mono tabular-nums text-[#F3F4F6]">
                     {Math.round(textConfig.fontScaleMultiplier * 100)}%
@@ -1156,6 +1587,7 @@ export const CleanInspector: React.FC<CleanInspectorProps> = ({
                 <input
                   id="txt-scale"
                   type="range"
+                  disabled={slidersLocked}
                   min={0.6}
                   max={1.5}
                   step={0.05}
@@ -1166,7 +1598,7 @@ export const CleanInspector: React.FC<CleanInspectorProps> = ({
                       fontScaleMultiplier: Number(e.target.value),
                     })
                   }
-                  className="studio-slider"
+                  className="studio-slider disabled:opacity-45"
                 />
               </div>
             </div>
@@ -1202,7 +1634,7 @@ export const CleanInspector: React.FC<CleanInspectorProps> = ({
                     aria-label="إرجاع الخط الافتراضي"
                     className="min-h-[44px] min-w-[44px] bg-[#20242C] text-[#D1D5DB] border border-white/10 rounded-lg flex items-center justify-center"
                   >
-                    <RotateCcw className="w-4 h-4" />
+                    <ResetParamIcon className="w-4 h-4" />
                   </button>
                 )}
                 <button
@@ -1210,7 +1642,7 @@ export const CleanInspector: React.FC<CleanInspectorProps> = ({
                   onClick={() => fontInputRef.current?.click()}
                   className="min-h-[44px] px-3 bg-[#20242C] hover:bg-[#282D37] text-[#F3F4F6] border border-white/10 rounded-lg text-xs font-medium flex items-center gap-1.5 whitespace-nowrap"
                 >
-                  <Upload className="w-4 h-4 text-[#3B82F6]" />
+                  <FontUploadVectorIcon className="w-4 h-4" />
                   <span>رفع خط</span>
                 </button>
               </div>

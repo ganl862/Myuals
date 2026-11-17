@@ -4,6 +4,25 @@ export const TOTAL_FRAMES = 250;
 
 export type PhaseId = 1 | 2 | 3 | 4 | 5;
 
+/**
+ * Industry-standard editorial cubic-bezier presets tuned for heavy optical weight,
+ * smooth velocity ramps, and decisive whip-pan deceleration.
+ */
+export const EDITORIAL_CURVES = {
+  /** Heavy exponential snap-out for 3D card shrink & weighted framing */
+  heavyExpoOut: [0.19, 1.0, 0.22, 1.0] as const,
+  /** Weighted angular momentum curve for 3D pitch/yaw settle */
+  weighted3DTilt: [0.14, 0.96, 0.24, 1.0] as const,
+  /** Heavy windup + explosive whip-pan exit */
+  heavyWhipOut: [0.48, 0.0, 0.74, 0.52] as const,
+  /** Decisive slam deceleration entering Frame B */
+  heavyWhipIn: [0.08, 0.96, 0.16, 1.0] as const,
+  /** Velvet cinema drift for continuous zoom-out */
+  silkZoomOut: [0.22, 1.0, 0.36, 1.0] as const,
+  /** Heavy beat surge & radial exposure build-up */
+  radialAttack: [0.68, 0.0, 0.88, 0.44] as const,
+};
+
 export interface MotionParams {
   beatBloomPeakBrightness: number; // default 1.8 (180%)
   radialBlurMaxPx: number;         // default 14
@@ -15,6 +34,10 @@ export interface MotionParams {
   neonGlowIntensity: number;       // default 1.0
   cosmicFirePower: number;         // default 1.0
   spinZoomBlurMax: number;         // default 1.0
+  card2StartScale?: number;        // default 0.72
+  card2EndScale?: number;          // default 0.54
+  tiltSwingDeg?: number;           // default 9.5
+  chromaticBoost?: number;         // default 1.0
 }
 
 export const DEFAULT_MOTION_PARAMS: MotionParams = {
@@ -28,6 +51,10 @@ export const DEFAULT_MOTION_PARAMS: MotionParams = {
   neonGlowIntensity: 1.0,
   cosmicFirePower: 1.0,
   spinZoomBlurMax: 1.0,
+  card2StartScale: 0.72,
+  card2EndScale: 0.54,
+  tiltSwingDeg: 9.5,
+  chromaticBoost: 1.0,
 };
 
 export interface TimelineState {
@@ -159,6 +186,45 @@ export function cubicBezier(
   return sampleY(clamp(t, 0, 1));
 }
 
+/**
+ * Instantaneous slope dy/dx of a cubic-bezier curve for physical velocity-coupled motion blur.
+ */
+export function cubicBezierVelocity(
+  p1x: number,
+  p1y: number,
+  p2x: number,
+  p2y: number,
+  x: number
+): number {
+  const eps = 0.005;
+  const x0 = clamp(x - eps, 0, 1);
+  const x1 = clamp(x + eps, 0, 1);
+  const dx = Math.max(1e-4, x1 - x0);
+  return Math.max(0, (cubicBezier(p1x, p1y, p2x, p2y, x1) - cubicBezier(p1x, p1y, p2x, p2y, x0)) / dx);
+}
+
+/**
+ * Zero-anchored damped impulse spring (x(0) = 0, dx/dt(0) = v0) so inertial overshoot
+ * joins incoming cubic-bezier paths with zero positional jump discontinuity.
+ */
+export function impulseSpring(
+  elapsedSec: number,
+  stiffness = 240,
+  damping = 20,
+  mass = 1,
+  initialVelocity = 1
+): number {
+  if (elapsedSec <= 0) return 0;
+  const omega0 = Math.sqrt(stiffness / mass);
+  const zeta = damping / (2 * Math.sqrt(stiffness * mass));
+
+  if (zeta < 1) {
+    const omegaD = omega0 * Math.sqrt(1 - zeta * zeta);
+    return Math.exp(-zeta * omega0 * elapsedSec) * (initialVelocity / omegaD) * Math.sin(omegaD * elapsedSec);
+  }
+  return Math.exp(-omega0 * elapsedSec) * initialVelocity * elapsedSec;
+}
+
 export function dampedSpring(
   elapsedSec: number,
   stiffness = 240,
@@ -232,10 +298,8 @@ export function computeTimelineState(
   }
 
   // --- Phase 1: Fake Zoom-Out (0->280ms) + Real Zoom-In (0->1916ms) ---
-  // Fake zoom-out pulls the inner frame slightly outward (0.82 -> 1.0) exposing mirrored outer edge echo
   const fakeT = clamp(timeMs / 280);
-  const clip1FakeZoomScale = lerp(0.84, 1.0, cubicBezier(0.16, 1, 0.3, 1, fakeT));
-  // Real zoom-in steadily pushes camera forward from 1.0 -> 1.18
+  const clip1FakeZoomScale = lerp(0.84, 1.0, cubicBezier(...EDITORIAL_CURVES.heavyExpoOut, fakeT));
   const realT = clamp(timeMs / 1916);
   const clip1RealZoomScale = lerp(1.0, 1.18, cubicBezier(0.25, 0.1, 0.25, 1, realT));
 
@@ -244,7 +308,6 @@ export function computeTimelineState(
   let geoDissolveAmount = 0;
   if (timeMs >= 816 && timeMs < 2083) {
     const slideT = clamp((timeMs - 816) / (1916 - 816));
-    // Smooth lateral slide sweep (-10% -> +6% drift)
     clip1SlideXPercent = Math.sin(slideT * Math.PI) * -9.5;
     const attack = smoothstep(816, 1020, timeMs);
     const release = 1 - smoothstep(1820, 2083, timeMs);
@@ -253,8 +316,16 @@ export function computeTimelineState(
 
   // Centered Word 1 at 0ms
   const word1Opacity = 1;
-  const word1Scale = lerp(1.24, 1.0, cubicBezier(0.16, 1, 0.3, 1, clamp(timeMs / 280)));
-  const word1RotateDeg = lerp(-6, 0, cubicBezier(0.16, 1, 0.3, 1, clamp(timeMs / 280)));
+  const word1Scale = lerp(
+    1.24,
+    1.0,
+    cubicBezier(...EDITORIAL_CURVES.heavyExpoOut, clamp(timeMs / 280))
+  );
+  const word1RotateDeg = lerp(
+    -6,
+    0,
+    cubicBezier(...EDITORIAL_CURVES.weighted3DTilt, clamp(timeMs / 280))
+  );
 
   // Beat flash 1 centered at 816ms (F49) -> brightness 180%
   const beatAttack = smoothstep(680, 816, timeMs);
@@ -264,29 +335,33 @@ export function computeTimelineState(
   // Word 2 reveals at 816ms in a contrasting color with slide-in
   const word2Opacity = smoothstep(795, 910, timeMs);
   const word2EnterT = clamp((timeMs - 795) / 280);
-  const word2Scale = lerp(1.28, 1.0, cubicBezier(0.16, 1, 0.3, 1, word2EnterT));
-  const word2SlideXPercent = lerp(-14, 0, cubicBezier(0.16, 1, 0.3, 1, word2EnterT));
+  const word2Scale = lerp(1.28, 1.0, cubicBezier(...EDITORIAL_CURVES.heavyExpoOut, word2EnterT));
+  const word2SlideXPercent = lerp(
+    -14,
+    0,
+    cubicBezier(...EDITORIAL_CURVES.heavyExpoOut, word2EnterT)
+  );
 
   // Intro text cuts cleanly during the 2083ms peak whiteout blast
   const introTextOpacity = timeMs < 2083 ? 1 - smoothstep(2050, 2083, timeMs) : 0;
 
-  // --- Phase 2: 1916ms - 2350ms ---
+  // --- Phase 2: 1916ms - 2350ms (Heavy Radial Exposure + Editorial 3D Card Shrink) ---
   let radialBlurPx = 0;
   if (timeMs >= 1916 && timeMs < 2083) {
     const t = clamp((timeMs - 1916) / (2083 - 1916));
-    radialBlurPx = lerp(0, params.radialBlurMaxPx, t * t);
+    radialBlurPx = lerp(0, params.radialBlurMaxPx, cubicBezier(...EDITORIAL_CURVES.radialAttack, t));
   } else if (timeMs >= 2083 && timeMs <= 2350) {
     const t = clamp((timeMs - 2083) / (2350 - 2083));
-    radialBlurPx = lerp(params.radialBlurMaxPx, 0, cubicBezier(0.16, 1, 0.3, 1, t));
+    radialBlurPx = lerp(params.radialBlurMaxPx, 0, cubicBezier(...EDITORIAL_CURVES.heavyExpoOut, t));
   }
 
   let whiteoutOpacity = 0;
   if (timeMs >= 1916 && timeMs < 2083) {
     const t = clamp((timeMs - 1916) / (2083 - 1916));
-    whiteoutOpacity = Math.pow(t, 2.2);
+    whiteoutOpacity = cubicBezier(...EDITORIAL_CURVES.radialAttack, t);
   } else if (timeMs >= 2083 && timeMs <= 2350) {
     const t = clamp((timeMs - 2083) / (2350 - 2083));
-    whiteoutOpacity = 1 - cubicBezier(0.16, 1, 0.3, 1, t);
+    whiteoutOpacity = 1 - cubicBezier(...EDITORIAL_CURVES.heavyExpoOut, t);
   }
 
   const beatBloomBrightness =
@@ -295,7 +370,7 @@ export function computeTimelineState(
     whiteoutOpacity * 0.75;
   const beatBloomFlare = clamp(beatFlashCurve * 0.68 + whiteoutOpacity * 0.9);
 
-  // Fullscreen -> 3D Card 1 shrink (2083ms - 2350ms) + Phase 3 spring settle
+  // Fullscreen -> 3D Card 1 shrink (2083ms - 2350ms) + Phase 3 continuous impulse settle
   let card1Scale = 1.0;
   let card1RotateZDeg = 0;
   let card1RotateXDeg = 0;
@@ -304,25 +379,27 @@ export function computeTimelineState(
 
   if (timeMs >= 2083 && timeMs < 2350) {
     const t = clamp((timeMs - 2083) / (2350 - 2083));
-    const eased = cubicBezier(0.16, 1, 0.3, 1, t);
-    card1Scale = lerp(1.0, params.cardTargetScale, eased);
-    card1RotateZDeg = lerp(0, params.cardTargetTiltDeg, eased);
-    card1RotateXDeg = Math.sin(t * Math.PI) * 7.5;
-    card1RotateYDeg = Math.sin(t * Math.PI) * -9.0;
-    card1CornerRadiusNorm = eased;
+    const shrinkEase = cubicBezier(...EDITORIAL_CURVES.heavyExpoOut, t);
+    const tiltEase = cubicBezier(...EDITORIAL_CURVES.weighted3DTilt, t);
+    card1Scale = lerp(1.0, params.cardTargetScale, shrinkEase);
+    card1RotateZDeg = lerp(0, params.cardTargetTiltDeg, shrinkEase);
+    const tiltArc = Math.sin(tiltEase * Math.PI);
+    card1RotateXDeg = tiltArc * 8.0;
+    card1RotateYDeg = tiltArc * -9.5;
+    card1CornerRadiusNorm = tiltEase;
   } else if (timeMs >= 2350) {
     const elapsedSec = (timeMs - 2350) / 1000;
-    const springVal = dampedSpring(
+    const springRipple = impulseSpring(
       elapsedSec,
       params.springStiffness,
       params.springDamping,
       1,
-      -5.5
+      -0.85
     );
-    card1Scale = params.cardTargetScale + springVal * 0.045;
-    card1RotateZDeg = params.cardTargetTiltDeg + springVal * -1.8;
-    card1RotateXDeg = springVal * 2.5;
-    card1RotateYDeg = springVal * -3.0;
+    card1Scale = params.cardTargetScale + springRipple * 0.65;
+    card1RotateZDeg = params.cardTargetTiltDeg + springRipple * -26;
+    card1RotateXDeg = springRipple * 36;
+    card1RotateYDeg = springRipple * -42;
     card1CornerRadiusNorm = 1;
   }
 
@@ -344,10 +421,12 @@ export function computeTimelineState(
     );
     accentOpacity = smoothstep(2380, 2455, timeMs) * (1 - smoothstep(2890, 2950, timeMs));
     accentSlideOffsetX = springAccent * 38;
-    accentScale = lerp(0.75, 1.0, cubicBezier(0.16, 1, 0.3, 1, enterT)) + (1 - enterT) * 0.08;
+    accentScale =
+      lerp(0.75, 1.0, cubicBezier(...EDITORIAL_CURVES.heavyExpoOut, enterT)) +
+      (1 - enterT) * 0.08;
   }
 
-  // --- Phase 4: Whip-Pan Dash (2850ms - 2966ms) ---
+  // --- Phase 4: Heavy Editorial Whip-Pan Dash Out (2850ms - 2966ms) ---
   let card1TranslateXPercent = 0;
   let whipFlashOpacity = 0;
   let whipOutBlur = 0;
@@ -358,16 +437,24 @@ export function computeTimelineState(
     const flashDown = 1 - smoothstep(2885, 2975, timeMs);
     whipFlashOpacity = (timeMs < 2885 ? flashUp : flashDown) * 0.88;
 
-    const whipCurve = t * t * (2 - t * 0.4);
-    card1TranslateXPercent = lerp(0, 160, clamp(whipCurve, 0, 1));
-    whipOutBlur = Math.sin(Math.min(1, t * 1.15) * Math.PI * 0.5) * params.whipBlurMaxPx;
+    const whipCurve = cubicBezier(...EDITORIAL_CURVES.heavyWhipOut, t);
+    const whipVel = cubicBezierVelocity(...EDITORIAL_CURVES.heavyWhipOut, t);
+    card1TranslateXPercent = lerp(0, 160, whipCurve);
+    // Physical velocity-coupled motion blur peaking cleanly at whip exit
+    const blurNorm = clamp((whipVel / 1.45) * 0.72 + Math.pow(t, 1.35) * 0.42, 0, 1);
+    whipOutBlur = (t >= 0.995 ? 1.0 : blurNorm) * params.whipBlurMaxPx;
   } else if (timeMs > 2966) {
     card1TranslateXPercent = 160;
   }
 
-  // --- Phase 5: Smooth Zoom-Out Card 2 + Rotation Title + Cosmic Fire + Spin Zoom Blur ---
+  // --- Phase 5: Continuous Whip-Pan Dash In + Smooth Zoom-Out + Rotation Title + Spin Zoom Blur ---
+  const c2StartScale = params.card2StartScale ?? 0.72;
+  const c2EndScale = params.card2EndScale ?? 0.54;
+  const maxTiltSwing = params.tiltSwingDeg ?? 9.5;
+  const chromaScale = params.chromaticBoost ?? 1.0;
+
   let card2TranslateXPercent = -160;
-  let card2Scale = 0.72;
+  let card2Scale = c2StartScale;
   let card2RotateZDeg = 0;
   let whipInBlur = 0;
   let card2BorderGlow = 0;
@@ -387,30 +474,39 @@ export function computeTimelineState(
   let rotationalZoomAmount = 0;
 
   if (timeMs >= 2983) {
-    const whipDurationMs = 220;
-    const t = clamp((timeMs - 2983) / whipDurationMs);
-    const whipEase = cubicBezier(0.16, 1, 0.3, 1, t);
+    const whipInDurationMs = 260;
+    const tIn = clamp((timeMs - 2983) / whipInDurationMs);
+    const whipEaseIn = cubicBezier(...EDITORIAL_CURVES.heavyWhipIn, tIn);
+    const whipVelIn = cubicBezierVelocity(...EDITORIAL_CURVES.heavyWhipIn, tIn);
 
-    const springElapsedSec = Math.max(0, (timeMs - 3050) / 1000);
-    const springDisp = dampedSpring(
-      springElapsedSec,
+    // Zero-anchored damped impulse spring creates seamless inertial overshoot (+10% -> 0%) with zero jump
+    const catchElapsedSec = Math.max(0, (timeMs - 3015) / 1000);
+    const catchImpulse = impulseSpring(
+      catchElapsedSec,
       params.springStiffness,
       params.springDamping,
       1,
-      -6.5
+      -26
+    );
+    const tiltImpulse = impulseSpring(
+      catchElapsedSec,
+      params.springStiffness,
+      params.springDamping,
+      1,
+      14
     );
 
-    if (timeMs < 3050) {
-      card2TranslateXPercent = lerp(-160, -16, whipEase);
-    } else {
-      card2TranslateXPercent = springDisp * -20;
-    }
+    card2TranslateXPercent = lerp(-160, 0, whipEaseIn) + catchImpulse * 0.9;
 
     // Scene 2 Smooth Continuous Zoom-Out: starts small (0.72) and zooms smoothly out to 0.54
     const zoomOutT = clamp((timeMs - 2983) / (TOTAL_DURATION_MS - 2983));
-    card2Scale = lerp(0.72, 0.54, cubicBezier(0.22, 1, 0.36, 1, zoomOutT));
-    card2RotateZDeg = springDisp * 4.2;
-    whipInBlur = (1 - smoothstep(2983, 3175, timeMs)) * params.whipBlurMaxPx;
+    card2Scale = lerp(c2StartScale, c2EndScale, cubicBezier(...EDITORIAL_CURVES.silkZoomOut, zoomOutT));
+    card2RotateZDeg = tiltImpulse * 4.5;
+
+    // Deceleration blur falls off rapidly as whip velocity drops toward settle
+    const inBlurEnvelope =
+      (1 - smoothstep(2983, 3190, timeMs)) * clamp(0.45 + whipVelIn * 0.25, 0, 1);
+    whipInBlur = inBlurEnvelope * params.whipBlurMaxPx;
     card2BorderGlow = smoothstep(3080, 3360, timeMs);
 
     if (timeMs < 3060) {
@@ -426,28 +522,27 @@ export function computeTimelineState(
       const aIn = smoothstep(2995, 3050, timeMs);
       const aOut = 1 - smoothstep(3180, 3340, timeMs);
       scene2AccentOpacity = aIn * aOut * 0.92;
-      scene2AccentRotateDeg = lerp(-24, 0, cubicBezier(0.16, 1, 0.3, 1, aT));
+      scene2AccentRotateDeg = lerp(-24, 0, cubicBezier(...EDITORIAL_CURVES.heavyExpoOut, aT));
     }
 
     // Main Neon Title enters with dramatic Tilt/Rotation animation (-22deg -> 0deg) + Cosmic Fire
     if (timeMs >= 3060) {
       const titleT = clamp((timeMs - 3060) / 420);
-      const easedSlide = cubicBezier(0.16, 1, 0.3, 1, titleT);
-      const springTitle = dampedSpring(
+      const easedSlide = cubicBezier(...EDITORIAL_CURVES.heavyExpoOut, titleT);
+      const tiltSlide = cubicBezier(...EDITORIAL_CURVES.weighted3DTilt, titleT);
+      const titleImpulse = impulseSpring(
         Math.max(0, (timeMs - 3180) / 1000),
         params.springStiffness,
         params.springDamping,
         1,
-        -4.5
+        10
       );
 
       neonTitleOpacity = smoothstep(3060, 3150, timeMs);
-      neonTitleTranslateXPercent =
-        timeMs < 3180 ? lerp(-110, -10, easedSlide) : springTitle * -12;
+      neonTitleTranslateXPercent = lerp(-110, 0, easedSlide) - titleImpulse * 1.4;
       neonTitleScale = lerp(1.26, 1.0, easedSlide);
-      // Signature tilt rotation animation settling upright in center
-      neonTitleRotateDeg =
-        timeMs < 3180 ? lerp(-22, 3.5, easedSlide) : springTitle * -4.2;
+      // Signature heavy tilt rotation animation settling upright in center
+      neonTitleRotateDeg = lerp(-22, 0, tiltSlide) + titleImpulse * 5.2;
 
       const surge = Math.sin(clamp((timeMs - 3080) / 360) * Math.PI) * 0.45;
       neonGlowAlpha = (smoothstep(3060, 3180, timeMs) + surge) * params.neonGlowIntensity;
@@ -460,12 +555,10 @@ export function computeTimelineState(
     // Finale (3540ms - 4166ms): Whole-Shot Tilt Animation + Rotational Zoom Blur ("روتيشن زوم بلور")
     if (timeMs >= 3540) {
       const fT = clamp((timeMs - 3540) / (TOTAL_DURATION_MS - 3540));
-      // Dynamic whip-tilt oscillation across the whole shot: 0 -> -11deg -> +4deg -> -2.5deg
       const envelope = Math.sin(fT * Math.PI);
       const secondaryWave = Math.sin(fT * Math.PI * 2.2);
-      scene2CameraTiltDeg = -9.5 * envelope + 3.2 * secondaryWave * (1 - fT * 0.35);
+      scene2CameraTiltDeg = -maxTiltSwing * envelope + 3.2 * secondaryWave * (1 - fT * 0.35);
 
-      // Rotational Zoom Blur peaks during the fast tilt velocity swings
       const blurStrength = (0.45 + 0.55 * Math.sin(fT * Math.PI)) * params.spinZoomBlurMax;
       rotationalBlurAngleRad = 0.048 * blurStrength;
       rotationalZoomAmount = 0.055 * blurStrength;
@@ -474,9 +567,10 @@ export function computeTimelineState(
 
   const horizontalMotionBlurPx = Math.max(whipOutBlur, whipInBlur);
   const chromaticSplitPx =
-    beatFlashCurve * 5.0 +
-    (horizontalMotionBlurPx / 24) * 7.0 +
-    (rotationalZoomAmount / 0.055) * 4.5;
+    (beatFlashCurve * 5.0 +
+      (horizontalMotionBlurPx / 24) * 7.0 +
+      (rotationalZoomAmount / 0.055) * 4.5) *
+    chromaScale;
 
   const showClip1 = timeMs <= 2966;
   const showClip2 = timeMs >= 2975;

@@ -29,12 +29,20 @@ uniform float u_whiteout;
 uniform float u_rotationalBlur;
 uniform float u_rotationalZoom;
 uniform float u_chromaticPx;
+uniform float u_time;
+uniform float u_noiseStrength;
 varying vec2 v_texCoord;
 
 vec2 rotateVec(vec2 v, float a) {
   float s = sin(a);
   float c = cos(a);
   return vec2(v.x * c - v.y * s, v.x * s + v.y * c);
+}
+
+float hash12(vec2 p) {
+  vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+  p3 += dot(p3, p3.yzx + 33.33);
+  return fract((p3.x + p3.y) * p3.z);
 }
 
 void main() {
@@ -89,8 +97,8 @@ void main() {
     float split = (u_chromaticPx / max(u_resolution.x, u_resolution.y)) * 1.8;
     float rCh = texture2D(u_image, clamp(uv + radialDir * split, 0.001, 0.999)).r;
     float bCh = texture2D(u_image, clamp(uv - radialDir * split, 0.001, 0.999)).b;
-    color.r = mix(color.r, rCh, 0.45);
-    color.b = mix(color.b, bCh, 0.45);
+    color.r = mix(color.r, rCh, 0.48);
+    color.b = mix(color.b, bCh, 0.48);
   }
 
   // Beat brightness surge (1.0 -> 1.8 = 180%)
@@ -102,6 +110,12 @@ void main() {
     float radialGlow = smoothstep(0.95, 0.05, dist) * u_bloomFlare;
     vec3 flareColor = vec3(1.0, 0.88, 0.68) * radialGlow * 0.55;
     color = 1.0 - (1.0 - clamp(color, 0.0, 1.0)) * (1.0 - clamp(flareColor, 0.0, 1.0));
+  }
+
+  // Deterministic editorial film grain driven purely by UV + render time (u_time)
+  if (u_noiseStrength > 0.0005) {
+    float grain = hash12(uv * u_resolution * 0.5 + vec2(fract(u_time * 24.0) * 173.1, fract(u_time * 37.0) * 91.7)) - 0.5;
+    color += vec3(grain * u_noiseStrength);
   }
 
   // Peak Whiteout Exposure Blast (mix-blend-mode: screen)
@@ -123,6 +137,8 @@ export interface WebGLPostParams {
   rotationalBlur: number;
   rotationalZoom: number;
   chromaticPx: number;
+  timeSec?: number;
+  noiseStrength?: number;
 }
 
 export class WebGLPostProcessor {
@@ -219,6 +235,8 @@ export class WebGLPostProcessor {
       u_rotationalBlur: gl.getUniformLocation(program, 'u_rotationalBlur'),
       u_rotationalZoom: gl.getUniformLocation(program, 'u_rotationalZoom'),
       u_chromaticPx: gl.getUniformLocation(program, 'u_chromaticPx'),
+      u_time: gl.getUniformLocation(program, 'u_time'),
+      u_noiseStrength: gl.getUniformLocation(program, 'u_noiseStrength'),
     };
 
     return true;
@@ -256,6 +274,8 @@ export class WebGLPostProcessor {
     gl.uniform1f(this.uniforms.u_rotationalBlur, params.rotationalBlur);
     gl.uniform1f(this.uniforms.u_rotationalZoom, params.rotationalZoom);
     gl.uniform1f(this.uniforms.u_chromaticPx, params.chromaticPx);
+    gl.uniform1f(this.uniforms.u_time, params.timeSec ?? 0);
+    gl.uniform1f(this.uniforms.u_noiseStrength, params.noiseStrength ?? 0);
 
     gl.drawArrays(gl.TRIANGLES, 0, 6);
 

@@ -19,6 +19,11 @@ export interface TextLayerConfig {
   cosmicAccentColor: string;
   cosmicLine1Color: string;
 
+  // Standalone Overlay Text Layer (e.g. عاشوراء 2025❤️ for Cosmic Fire Glow)
+  overlayText: string;
+  overlayTextEnabled: boolean;
+  overlayTextColor: string;
+
   autoScale: boolean;
   fontScaleMultiplier: number; // 0.6..1.5
   customFontFamily: string | null;
@@ -54,6 +59,10 @@ export const DEFAULT_TEXT_CONFIG: TextLayerConfig = {
   cosmicCreditEnabled: true,
   cosmicAccentColor: '#FF2D2D',
   cosmicLine1Color: '#FFFFFF',
+
+  overlayText: 'عاشوراء 2025❤️',
+  overlayTextEnabled: false,
+  overlayTextColor: '#FFFFFF',
 
   autoScale: true,
   fontScaleMultiplier: 1.0,
